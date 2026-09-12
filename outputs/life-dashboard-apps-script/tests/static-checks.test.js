@@ -28,7 +28,8 @@ const ROOT = path.join(__dirname, '..');
 
 const DEPLOYED_GS_FILES = [
   'Code.gs', 'Database.gs', 'Tasks.gs', 'Calendar.gs', 'Jobs.gs',
-  'JobProfile.gs', 'JobSource_JSearch.gs', 'JobFilters.gs', 'JobDedupe.gs', 'Discovery.gs'
+  'JobProfile.gs', 'JobSource_JSearch.gs', 'JobFilters.gs', 'JobDedupe.gs', 'Discovery.gs',
+  'Applications.gs'
 ];
 const DEPLOYED_HTML_FILES = ['Index.html', 'Styles.html', 'JavaScript.html'];
 const ALL_DEPLOYED_FILES = ['appsscript.json'].concat(DEPLOYED_GS_FILES, DEPLOYED_HTML_FILES);
@@ -46,6 +47,9 @@ const PUBLIC_ALLOWLIST = [
   'getDashboardData', 'createTask', 'completeTask', 'reopenTask', 'archiveTask',
   'getUpcomingEvents', 'getJobsQueue', 'setJobStatus', 'addJobNote', 'getJobHistory',
   'runDiscovery',
+  // Phase 5 Milestone 1: Applications tracking workflow
+  'createApplication', 'setApplicationStatus', 'getApplicationById',
+  'getApplicationsByJobId', 'getApplicationHistory', 'updateApplication',
   // Phase 4B (Discovery.gs), editor-run administrative actions. Apps
   // Script has no "editor-only" visibility level (see the note above on
   // initializeDatabase), so each is listed honestly rather than pretending
@@ -399,7 +403,7 @@ describe('static checks: Phase 4A network boundary', () => {
     assert.equal(/fetch\(/.test(stripped), false, 'JavaScript.html must not contain fetch(');
   });
 
-  it('S7: .claspignore un-ignores exactly ALL_DEPLOYED_FILES (14 files total)', () => {
+  it('S7: .claspignore un-ignores exactly ALL_DEPLOYED_FILES (15 files total)', () => {
     const claspignore = fs.readFileSync(path.join(ROOT, '.claspignore'), 'utf8');
     const unignored = claspignore
       .split(/\r?\n/)

@@ -29,6 +29,9 @@ const SCHEMA = Object.freeze({
     'id', 'job_id', 'status', 'applied_at', 'follow_up_at', 'contact_name', 'contact_email',
     'interview_at', 'outcome', 'notes', 'created_at', 'updated_at'
   ]),
+  ApplicationHistory: Object.freeze([
+    'id', 'application_id', 'job_id', 'action', 'from_status', 'to_status', 'note', 'created_at'
+  ]),
   // Phase 4B. One row per discovery run (manual or scheduled), keyed on
   // run_id (there is no 'id' column, so primaryKeyField_ falls back to the
   // first field — see that function's comment). Supports checkpoint/resume:
@@ -82,6 +85,7 @@ const PLAIN_TEXT_FIELDS_ = Object.freeze({
   JobHistory: Object.freeze(['id', 'job_id', 'action', 'from_status', 'to_status', 'note']),
   Settings: Object.freeze(['key', 'value']),
   Applications: Object.freeze(['id', 'contact_name', 'contact_email', 'outcome', 'notes']),
+  ApplicationHistory: Object.freeze(['id', 'application_id', 'job_id', 'action', 'from_status', 'to_status', 'note']),
   // config_version, pages_attempted and the *_count columns are deliberately
   // EXCLUDED here: they are real numbers (config_version mirrors
   // JOB_PROFILE_.configVersion; the rest are run counters), and Phase 2/3's

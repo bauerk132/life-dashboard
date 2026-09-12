@@ -62,9 +62,9 @@ describe('test harness sanity', () => {
     const ctx = loadAppsScriptContext_();
     assert.deepEqual(
       Object.keys(ctx.testExports.SCHEMA).sort(),
-      // DiscoveryLog/DiscoveryRuns added in Phase 4B (Database.gs) for the
-      // checkpointed discovery orchestrator's run/log tables.
-      ['Applications', 'DiscoveryLog', 'DiscoveryRuns', 'JobHistory', 'Jobs', 'Settings', 'Tasks']
+      // ApplicationHistory added in Phase 5 Milestone 1 (Database.gs)
+      // for deterministic application status tracking.
+      ['ApplicationHistory', 'Applications', 'DiscoveryLog', 'DiscoveryRuns', 'JobHistory', 'Jobs', 'Settings', 'Tasks']
     );
     assert.ok(Array.isArray(ctx.testExports.PLAIN_TEXT_FIELDS_.Tasks));
   });
