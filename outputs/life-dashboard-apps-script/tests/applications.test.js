@@ -857,3 +857,82 @@ describe('Applications: Offline Isolation & UrlFetchApp Invariant', () => {
     assert.equal(ctx.urlFetch.calls.length, 0, 'UrlFetchApp must never be invoked during application operations');
   });
 });
+
+describe('Applications: Concurrency and Replay Repairs (F4, F12)', () => {
+  it('F4: setApplicationStatus rejects stale concurrent edit with CONFLICT', () => {
+    const schema = schema_();
+    const sheets = initializedSheets_(schema);
+    sheets.Jobs.rows.push(jobRow_(schema, { id: 'job-f4-1', status: 'Ready to Apply' }));
+
+    const ctx = loadAppsScriptContext_({ files: APP_FILES, initialSheets: sheets });
+    const app = ctx.sandbox.createApplication({ job_id: 'job-f4-1', status: 'Draft' });
+
+    // Simulate concurrent edit in sheet before update executes:
+    const originalFind = ctx.sandbox.findUniqueApplicationById_;
+    ctx.sandbox.findUniqueApplicationById_ = function (ss, id) {
+      const result = originalFind.call(this, ss, id);
+      // Alter sheet data directly to simulate concurrent modification
+      const sheet = ss.getSheetByName('Applications');
+      const statusIdx = schema.Applications.indexOf('status');
+      sheet.data[1][statusIdx] = 'Applied'; // changed concurrently
+      return result;
+    };
+
+    assert.throws(() => {
+      ctx.sandbox.setApplicationStatus(app.id, 'Withdrawn', 'Test conflict');
+    }, (err) => {
+      assert.equal(err.code, 'CONFLICT');
+      return true;
+    });
+  });
+
+  it('F4: updateApplication rejects stale concurrent edit with CONFLICT', () => {
+    const schema = schema_();
+    const sheets = initializedSheets_(schema);
+    sheets.Jobs.rows.push(jobRow_(schema, { id: 'job-f4-2', status: 'Ready to Apply' }));
+
+    const ctx = loadAppsScriptContext_({ files: APP_FILES, initialSheets: sheets });
+    const app = ctx.sandbox.createApplication({ job_id: 'job-f4-2', status: 'Draft' });
+
+    // Simulate concurrent edit in sheet before update executes
+    const originalFind = ctx.sandbox.findUniqueApplicationById_;
+    ctx.sandbox.findUniqueApplicationById_ = function (ss, id) {
+      const result = originalFind.call(this, ss, id);
+      const sheet = ss.getSheetByName('Applications');
+      const statusIdx = schema.Applications.indexOf('status');
+      sheet.data[1][statusIdx] = 'Applied'; // changed concurrently
+      return result;
+    };
+
+    assert.throws(() => {
+      ctx.sandbox.updateApplication(app.id, { notes: 'New notes' });
+    }, (err) => {
+      assert.equal(err.code, 'CONFLICT');
+      return true;
+    });
+  });
+
+  it('F12: createApplication replay with omitted status on Applied row returns idempotent success', () => {
+    const schema = schema_();
+    const sheets = initializedSheets_(schema);
+    sheets.Jobs.rows.push(jobRow_(schema, { id: 'job-f12', status: 'Ready to Apply' }));
+
+    const ctx = loadAppsScriptContext_({ files: APP_FILES, initialSheets: sheets });
+
+    // Initial creation with explicit Applied status
+    const app = ctx.sandbox.createApplication({
+      id: 'app-replay-1',
+      job_id: 'job-f12',
+      status: 'Applied'
+    });
+    assert.equal(app.status, 'Applied');
+
+    // Retry with omitted status - should succeed idempotently, not throw DUPLICATE_ID
+    const replayed = ctx.sandbox.createApplication({
+      id: 'app-replay-1',
+      job_id: 'job-f12'
+    });
+    assert.equal(replayed.id, 'app-replay-1');
+    assert.equal(replayed.status, 'Applied');
+  });
+});

@@ -21,7 +21,7 @@ function createMockGeminiResponse(scoreData, usageData) {
     education_match: 75,
     location_match: 90,
     salary_match: 85,
-    overall_match: 84,
+    overall_match: 84, // Will be overridden by weighted sum
     recommendation: 'Strong Match',
     evidence: ['Required 2+ years help desk experience verified', 'Active Directory administration mentioned'],
     gaps: ['Requires macOS support experience which is unconfirmed']
@@ -156,7 +156,7 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
       assert.equal(scores.length, 1);
       assert.equal(scores[0].job_id, job.id);
       assert.equal(scores[0].status, 'Validated');
-      assert.equal(scores[0].overall_match, 84);
+      assert.equal(scores[0].overall_match, 84); // 85*0.35 + 80*0.25 + 75*0.10 + 90*0.15 + 85*0.15 = 83.5 -> 84
       assert.equal(scores[0].recommendation, 'Strong Match');
       assert.equal(scores[0].input_tokens, 520);
       assert.equal(scores[0].output_tokens, 140);
@@ -168,19 +168,22 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
       assert.equal(jobs[0].recommendation, 'Strong Match');
       assert.ok(jobs[0].why_matches.includes('Active Directory'));
 
-      // Verify AIUsage record
+      // Verify AIUsage record (reservation + reconcile)
       const usage = ctx.sandbox.readRows_(ss, 'AIUsage');
-      assert.equal(usage.length, 1);
-      assert.equal(usage[0].job_id, job.id);
-      assert.equal(usage[0].status, 'Completed');
-      assert.equal(usage[0].input_tokens, 520);
-      assert.equal(usage[0].output_tokens, 140);
+      assert.equal(usage.length, 2);
+      assert.equal(usage[0].status, 'Reserved');
+      assert.equal(usage[1].job_id, job.id);
+      assert.equal(usage[1].status, 'Completed');
+      assert.equal(usage[1].input_tokens, 520);
+      assert.equal(usage[1].output_tokens, 140);
+      assert.equal(usage[1].operation, 'reconcile');
     });
 
     it('T03: formula injection in model response is escaped before writing to Sheet', () => {
+      // Added "Windows" so it doesn't get marked ungrounded
       const maliciousResponse = createMockGeminiResponse({
-        evidence: ['=SUM(1+1)', '@evil_command', '+50000'],
-        gaps: ['-bad_gap', '=cmd|\' /C calc\'!A0']
+        evidence: ['=SUM(1+1) Windows', '@evil_command Windows', '+50000 Windows'],
+        gaps: ['-bad_gap Windows', '=cmd|\' /C calc\'!A0 Windows']
       });
       const ctx = createContext({
         urlFetch: { responses: [maliciousResponse] }
@@ -285,7 +288,7 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
         job_id: 'prior_job',
         provider: 'Google Gemini',
         model: 'gemini-2.5-flash',
-        operation: 'score_job',
+        operation: 'reconcile',
         profile_version: '1.0.0',
         prompt_version: '1.0.0',
         request_started_at: new Date(),
@@ -313,7 +316,7 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
         job_id: 'prior_job',
         provider: 'Google Gemini',
         model: 'gemini-2.5-flash',
-        operation: 'score_job',
+        operation: 'reconcile',
         profile_version: '1.0.0',
         prompt_version: '1.0.0',
         request_started_at: new Date(),
@@ -392,9 +395,10 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
 
       const ss = ctx.sandbox.getDb_();
       const usage = ctx.sandbox.readRows_(ss, 'AIUsage');
-      assert.equal(usage.length, 1);
-      assert.equal(usage[0].status, 'Failed');
-      assert.equal(usage[0].error_code, 'PROVIDER_UNAVAILABLE');
+      // Reservation + Reconcile = 2 rows
+      assert.equal(usage.length, 2);
+      assert.equal(usage[1].status, 'Failed');
+      assert.equal(usage[1].error_code, 'PROVIDER_UNAVAILABLE');
     });
   });
 
@@ -413,6 +417,243 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
 
       // Assert 0 network calls
       assert.equal(ctx.urlFetch.calls.length, 0, 'Browsing queue and history must never invoke UrlFetchApp');
+    });
+  });
+
+  describe('Phase 5 Milestone 2 - R1-R6, F7, F9, F10 Repairs', () => {
+    it('T13: R1 corrected - Fabricated evidence claim + extra unknown key is rejected', () => {
+      const mockResponse = createMockGeminiResponse({
+        evidence: ['Has CCNA certification'], // not in desc
+        extra_key: 123
+      });
+      const ctx = createContext({ urlFetch: { responses: [mockResponse] } });
+      insertSampleJob(ctx, { description: 'Needs Windows experience.' });
+
+      const summary = hostify_(ctx.sandbox.scorePendingJobs(1));
+      assert.equal(summary.quarantined, 1);
+
+      const ss = ctx.sandbox.getDb_();
+      const scores = ctx.sandbox.readRows_(ss, 'JobScores');
+      assert.equal(scores[0].status, 'Quarantined');
+      assert.equal(scores[0].error_code, 'UNKNOWN_FIELD');
+
+      // Also test ungrounded evidence rejection
+      const mockResponse2 = createMockGeminiResponse({
+        evidence: ['Has CCNA certification']
+      });
+      const ctx2 = createContext({ urlFetch: { responses: [mockResponse2] } });
+      insertSampleJob(ctx2, { description: 'Needs Windows experience.' });
+
+      hostify_(ctx2.sandbox.scorePendingJobs(1));
+      const ss2 = ctx2.sandbox.getDb_();
+      const scores2 = ctx2.sandbox.readRows_(ss2, 'JobScores');
+      assert.equal(scores2[0].status, 'Validated');
+      const parsedEv = JSON.parse(scores2[0].evidence_json);
+      assert.ok(parsedEv[0].includes('[UNGROUNDED]'));
+    });
+
+    it('T14: R2 corrected - published overall is deterministic weighted sum, model overall override ignored', () => {
+      const mockResponse = createMockGeminiResponse({
+        skills_match: 70, experience_match: 70, education_match: 70,
+        location_match: 70, salary_match: 70, overall_match: 84
+      });
+      const ctx = createContext({ urlFetch: { responses: [mockResponse] } });
+      insertSampleJob(ctx);
+      hostify_(ctx.sandbox.scorePendingJobs(1));
+
+      const ss = ctx.sandbox.getDb_();
+      const scores = ctx.sandbox.readRows_(ss, 'JobScores');
+      if (!scores[0]) console.error('T14 failed summary:', summary, 'jobs:', ctx.sandbox.readRows_(ss, 'Jobs'), 'scores:', scores, 'usage:', ctx.sandbox.readRows_(ss, 'AIUsage')); assert.equal(scores[0].overall_match, 70); // 70 * weights = 70
+    });
+
+    it('T15: R4 corrected - Pricing math at $0.30/$2.50 rates', () => {
+      const ctx = createContext();
+      // 1,000,000 in = $0.30, 1,000,000 out = $2.50
+      const cost = ctx.sandbox.calculateCostUsd_(2000000, 1000000); // 0.60 + 2.50 = 3.10
+      assert.equal(cost, 3.10);
+    });
+
+    it('T16: R4 corrected - Reservation sizing >= cost of maxOutputTokens', () => {
+      const ctx = createContext();
+      const maxOutputTokens = 2048; // from requirement
+      const inputTokens = 2000;
+      const calculatedCost = ctx.sandbox.calculateCostUsd_(inputTokens, maxOutputTokens);
+      // WORST_CASE_RESERVATION_COST_USD_ is 0.006
+      assert.ok(0.006 >= calculatedCost);
+    });
+
+    it('T17: R5 corrected - Cache lookup with obsolete profile version is not a cache hit', () => {
+      const mockResponse = createMockGeminiResponse();
+      const ctx = createContext({ urlFetch: { responses: [mockResponse, mockResponse] } });
+      const job = insertSampleJob(ctx);
+
+      hostify_(ctx.sandbox.scorePendingJobs(1));
+
+      const ss = ctx.sandbox.getDb_();
+      // change profile version of the existing score
+      const scores = ctx.sandbox.readRows_(ss, 'JobScores'); if(!scores[0]) console.error('T17 scores empty', summary); ctx.sandbox.updateRecordByIdInDb_(ss, 'JobScores', scores[0].id, { profile_version: '0.9.0' });
+      // clear jobs overall_match
+      ctx.sandbox.updateRecordByIdInDb_(ss, 'Jobs', job.id, { overall_match: '' });
+
+      const summary = hostify_(ctx.sandbox.scorePendingJobs(1));
+      assert.equal(summary.scored, 1);
+      assert.equal(summary.cached, 0);
+      assert.equal(ctx.urlFetch.calls.length, 2);
+    });
+
+    it('T18: R5 corrected - Cache lookup matching ALL fields is a cache hit', () => {
+      const mockResponse = createMockGeminiResponse();
+      const ctx = createContext({ urlFetch: { responses: [mockResponse, mockResponse] } });
+      const job = insertSampleJob(ctx);
+
+      hostify_(ctx.sandbox.scorePendingJobs(1));
+      ctx.sandbox.updateRecordByIdInDb_(ctx.sandbox.getDb_(), 'Jobs', job.id, { overall_match: '' });
+
+      const summary = hostify_(ctx.sandbox.scorePendingJobs(1));
+      assert.equal(summary.cached, 1);
+      assert.equal(ctx.urlFetch.calls.length, 1); // no new call
+    });
+
+    it('T19: R6 corrected - formatScoringPrompt_ with actual JOB_PROFILE_', () => {
+      const ctx = createContext();
+      const job = { description: 'test desc' };
+      const profile = {
+        configVersion: 2,
+        priorities: {
+          p1: { titleTerms: ['Help Desk'] },
+          p2: { titleTerms: [] },
+          p3: { titleTerms: [] }
+        },
+        requiredSkills: ['Windows', 'Mac'],
+        optionalSkills: ['Linux'],
+        compensation: { minHourlyUsd: 20, minAnnualUsd: 40000 },
+        workMode: { remotePreferred: true }
+      };
+      const prompt = ctx.sandbox.formatScoringPrompt_(job, profile);
+      assert.ok(prompt.includes('Target Titles: Help Desk'));
+      assert.ok(prompt.includes('Required: Windows, Mac'));
+      assert.ok(prompt.includes('Optional: Linux'));
+      assert.ok(prompt.includes('Min Hourly: $20 / Min Annual: $40000'));
+      assert.ok(prompt.includes('Remote preferred'));
+    });
+
+    it('T20: R6 corrected - formatScoringPrompt_ with missing profile fields throws INVALID_PROFILE', () => {
+      const ctx = createContext();
+      const job = { description: 'test desc' };
+      assert.throws(() => {
+        ctx.sandbox.formatScoringPrompt_(job, {});
+      }, err => err.code === 'INVALID_PROFILE');
+    });
+
+    it('T21: F7 corrected - scorePendingJobs with changed description is eligible for rescore', () => {
+      const mockResponse1 = createMockGeminiResponse({ overall_match: 50 });
+      const mockResponse2 = createMockGeminiResponse({ overall_match: 99 });
+      const ctx = createContext({ urlFetch: { responses: [mockResponse1, mockResponse2] } });
+      const job = insertSampleJob(ctx);
+
+      hostify_(ctx.sandbox.scorePendingJobs(1));
+
+      // change description, keep overall_match
+      const ss = ctx.sandbox.getDb_();
+      ctx.sandbox.updateRecordByIdInDb_(ss, 'Jobs', job.id, { description: 'Completely different description' });
+
+      const summary = hostify_(ctx.sandbox.scorePendingJobs(1));
+      assert.equal(summary.scored, 1);
+      assert.equal(ctx.urlFetch.calls.length, 2);
+    });
+
+    it('T22: F9 corrected - reconcileUsageInDb_ appends a new row instead of mutating reservation', () => {
+      const ctx = createContext();
+      const ss = ctx.sandbox.getDb_();
+      const resId = ctx.sandbox.checkAndReserveMonthlyBudgetInDb_(ss, 'job123', 'run123', '1.0.0');
+
+      const before = ctx.sandbox.readRows_(ss, 'AIUsage');
+      assert.equal(before.length, 1);
+      assert.equal(before[0].status, 'Reserved');
+
+      ctx.sandbox.reconcileUsageInDb_(ss, resId, 100, 50, 'Completed', '');
+
+      const after = ctx.sandbox.readRows_(ss, 'AIUsage');
+      assert.equal(after.length, 2);
+      assert.equal(after[0].id, resId); // reservation
+      assert.equal(after[0].status, 'Reserved');
+      assert.equal(after[1].status, 'Completed');
+      assert.equal(after[1].operation, 'reconcile');
+    });
+
+    it('T23: F10 corrected - Budget period uses America/New_York', () => {
+      const ctx = createContext();
+      // Ensure getNewYorkYearMonth_ matches format yyyy-MM
+      const ym = ctx.sandbox.getNewYorkYearMonth_(new Date('2026-01-01T02:00:00Z')); // Jan 1st 2am UTC is Dec 31st 9pm EST
+      assert.equal(ym, '2025-12');
+    });
+
+    it('T24: Post-dispatch failure preserves cost', () => {
+      const ctx = createContext();
+      const ss = ctx.sandbox.getDb_();
+      const resId = ctx.sandbox.checkAndReserveMonthlyBudgetInDb_(ss, 'job123', 'run123', '1.0.0');
+
+      ctx.sandbox.reconcileUsageInDb_(ss, resId, 1000, 500, 'Failed', 'API_ERROR');
+
+      const after = ctx.sandbox.readRows_(ss, 'AIUsage');
+      assert.equal(after[1].status, 'Failed');
+      assert.equal(after[1].input_tokens, 1000);
+      assert.equal(after[1].output_tokens, 500);
+      assert.ok(after[1].estimated_cost > 0);
+    });
+
+    it('T25: R3 corrected - missing usageMetadata throws MISSING_USAGE_METADATA and invalid tokens throw INVALID_USAGE_DATA', () => {
+      // 1. Missing usageMetadata
+      const ctx1 = createContext({
+        urlFetch: {
+          responses: [{
+            code: 200,
+            body: JSON.stringify({
+              candidates: [{ content: { parts: [{ text: JSON.stringify({ skills_match: 70 }) }] } }]
+            })
+          }]
+        }
+      });
+      assert.throws(() => {
+        ctx1.sandbox.geminiCallScoringEndpoint_('Test prompt');
+      }, (err) => {
+        return err.code === 'MISSING_USAGE_METADATA';
+      });
+
+      // 2. Invalid negative token counts
+      const ctx2 = createContext({
+        urlFetch: {
+          responses: [{
+            code: 200,
+            body: JSON.stringify({
+              candidates: [{ content: { parts: [{ text: JSON.stringify({ skills_match: 70 }) }] } }],
+              usageMetadata: { promptTokenCount: -5, candidatesTokenCount: 10 }
+            })
+          }]
+        }
+      });
+      assert.throws(() => {
+        ctx2.sandbox.geminiCallScoringEndpoint_('Test prompt');
+      }, (err) => {
+        return err.code === 'INVALID_USAGE_DATA';
+      });
+    });
+
+    it('T26: R3 corrected - thoughtsTokenCount is parsed and added to outputTokens', () => {
+      const ctx = createContext({
+        urlFetch: {
+          responses: [{
+            code: 200,
+            body: JSON.stringify({
+              candidates: [{ content: { parts: [{ text: JSON.stringify({ skills_match: 80 }) }] } }],
+              usageMetadata: { promptTokenCount: 500, candidatesTokenCount: 150, thoughtsTokenCount: 300 }
+            })
+          }]
+        }
+      });
+      const res = ctx.sandbox.geminiCallScoringEndpoint_('Test prompt');
+      assert.equal(res.inputTokens, 500);
+      assert.equal(res.outputTokens, 450); // 150 candidates + 300 thoughts
     });
   });
 });

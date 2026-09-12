@@ -135,32 +135,60 @@ function geminiCallScoringEndpoint_(promptText) {
     throw UserError_('Gemini response was not valid JSON.', 'MALFORMED_RESPONSE');
   }
 
+  // Defect R3 fix: usageMetadata is required for budget accounting
+  const usage = jsonResponse.usageMetadata;
+  if (!usage || typeof usage !== 'object') {
+    throw UserError_('Gemini response missing usage metadata.', 'MISSING_USAGE_METADATA');
+  }
+
+  const inTokens = usage.promptTokenCount;
+  const candTokens = usage.candidatesTokenCount;
+  const thoughtsTokens = (typeof usage.thoughtsTokenCount === 'number' && Number.isFinite(usage.thoughtsTokenCount) && usage.thoughtsTokenCount >= 0)
+    ? usage.thoughtsTokenCount
+    : 0;
+
+  if (typeof inTokens !== 'number' || !Number.isFinite(inTokens) || inTokens < 0 || inTokens % 1 !== 0 ||
+      typeof candTokens !== 'number' || !Number.isFinite(candTokens) || candTokens < 0 || candTokens % 1 !== 0) {
+    throw UserError_('Gemini usage metadata contains invalid token counts.', 'INVALID_USAGE_DATA');
+  }
+
+  const inputTokens = inTokens;
+  const outputTokens = candTokens + thoughtsTokens;
+
   const candidates = jsonResponse.candidates;
   if (!Array.isArray(candidates) || candidates.length === 0) {
-    throw UserError_('Gemini response contained no candidates.', 'EMPTY_RESPONSE');
+    const err = UserError_('Gemini response contained no candidates.', 'EMPTY_RESPONSE');
+    err.inputTokens = inputTokens;
+    err.outputTokens = outputTokens;
+    throw err;
   }
 
   const firstCandidate = candidates[0];
   const content = firstCandidate.content;
   if (!content || !Array.isArray(content.parts) || content.parts.length === 0) {
-    throw UserError_('Gemini candidate contained no content parts.', 'EMPTY_RESPONSE');
+    const err = UserError_('Gemini candidate contained no content parts.', 'EMPTY_RESPONSE');
+    err.inputTokens = inputTokens;
+    err.outputTokens = outputTokens;
+    throw err;
   }
 
   const rawPartText = content.parts[0].text;
   if (!rawPartText || typeof rawPartText !== 'string') {
-    throw UserError_('Gemini response part contained no text.', 'EMPTY_RESPONSE');
+    const err = UserError_('Gemini response part contained no text.', 'EMPTY_RESPONSE');
+    err.inputTokens = inputTokens;
+    err.outputTokens = outputTokens;
+    throw err;
   }
 
   let parsedScore;
   try {
     parsedScore = JSON.parse(rawPartText);
   } catch (scoreJsonErr) {
-    throw UserError_('Gemini output text could not be parsed as scoring JSON.', 'MALFORMED_RESPONSE');
+    const err = UserError_('Gemini output text could not be parsed as scoring JSON.', 'MALFORMED_RESPONSE');
+    err.inputTokens = inputTokens;
+    err.outputTokens = outputTokens;
+    throw err;
   }
-
-  const usage = jsonResponse.usageMetadata || {};
-  const inputTokens = typeof usage.promptTokenCount === 'number' ? usage.promptTokenCount : 0;
-  const outputTokens = typeof usage.candidatesTokenCount === 'number' ? usage.candidatesTokenCount : 0;
 
   // Generate safe non-secret diagnostic hash
   const hashInput = startedAt.toISOString() + ':' + inputTokens + ':' + outputTokens + ':' + rawPartText.length;

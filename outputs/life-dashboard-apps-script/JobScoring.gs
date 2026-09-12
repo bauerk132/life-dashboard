@@ -15,9 +15,11 @@ const SCORING_SCHEMA_VERSION_ = '1.0.0';
 const PROMPT_VERSION_ = '1.0.0';
 const MONTHLY_BUDGET_CEILING_USD_ = 1.00;
 const MAX_CANDIDATES_PER_RUN_ = 10;
-const GEMINI_INPUT_COST_PER_MILLION_USD_ = 0.075;
-const GEMINI_OUTPUT_COST_PER_MILLION_USD_ = 0.30;
-const WORST_CASE_RESERVATION_COST_USD_ = 0.00045; // ~2000 input tokens + 1000 output tokens
+
+// FIXED R4: Update Gemini 2.5 Flash constants to correct public rates
+const GEMINI_INPUT_COST_PER_MILLION_USD_ = 0.30;
+const GEMINI_OUTPUT_COST_PER_MILLION_USD_ = 2.50;
+const WORST_CASE_RESERVATION_COST_USD_ = 0.006; // >= max size (2048 output tokens)
 
 const SCORING_RECOMMENDATIONS_ = Object.freeze([
   'Strong Match', 'Possible Match', 'Not a Match'
@@ -25,6 +27,27 @@ const SCORING_RECOMMENDATIONS_ = Object.freeze([
 const MAX_EVIDENCE_ITEMS_ = 10;
 const MAX_GAP_ITEMS_ = 10;
 const MAX_ITEM_LENGTH_ = 500;
+
+/**
+ * FIXED F10: Gets America/New_York "yyyy-MM" budget period identifier
+ */
+function getNewYorkYearMonth_(date) {
+  try {
+    const opts = { timeZone: 'America/New_York', year: 'numeric', month: '2-digit' };
+    const formatter = new Intl.DateTimeFormat('en-CA', opts);
+    const parts = formatter.formatToParts(date);
+    let y = '', m = '';
+    for (const p of parts) {
+      if (p.type === 'year') y = p.value;
+      if (p.type === 'month') m = p.value;
+    }
+    return `${y}-${m}`;
+  } catch (e) {
+    const d = new Date(date.getTime() - (date.getTimezoneOffset() * 60000));
+    const m = (d.getUTCMonth() + 1).toString().padStart(2, '0');
+    return `${d.getUTCFullYear()}-${m}`;
+  }
+}
 
 /**
  * Computes deterministic SHA-256 hash of job description text.
@@ -73,13 +96,31 @@ function sanitizeJobDescriptionForPrompt_(description) {
 /**
  * Prepares the minimal prompt transmitting only approved profile fields
  * and sanitized job descriptions. Candidate personal PII is completely excluded.
+ * FIXED R6: Uses exact JOB_PROFILE_ shape and fails closed on missing properties.
  */
 function formatScoringPrompt_(job, profile) {
+  if (!profile || typeof profile !== 'object' || typeof profile.configVersion !== 'number') {
+    throw UserError_('Invalid profile shape', 'INVALID_PROFILE');
+  }
+  if (!profile.priorities || !profile.requiredSkills) {
+    throw UserError_('Job profile missing required fields for scoring', 'INVALID_PROFILE');
+  }
+
+  // Safely extract from complex actual profile structure
+  const targetTitles = [];
+  if (profile.priorities) {
+    Object.keys(profile.priorities).forEach(k => {
+      const p = profile.priorities[k];
+      if (p && Array.isArray(p.titleTerms)) targetTitles.push(...p.titleTerms);
+    });
+  }
+  const reqSkills = Array.isArray(profile.requiredSkills) ? profile.requiredSkills : [];
+  const optSkills = Array.isArray(profile.optionalSkills) ? profile.optionalSkills : [];
+  const minHourly = profile.compensation && profile.compensation.minHourlyUsd ? profile.compensation.minHourlyUsd : null;
+  const minAnnual = profile.compensation && profile.compensation.minAnnualUsd ? profile.compensation.minAnnualUsd : null;
+  const remotePref = profile.workMode && profile.workMode.remotePreferred ? 'Remote preferred' : 'On-site or remote';
+
   const sanitizedDesc = sanitizeJobDescriptionForPrompt_(job.description);
-  const targetTitles = Array.isArray(profile.titles) ? profile.titles.join(', ') : '';
-  const targetSkills = Array.isArray(profile.skills) ? profile.skills.join(', ') : '';
-  const minSalary = profile.minSalary ? '$' + profile.minSalary : 'Not specified';
-  const remotePref = profile.remote ? 'Remote preferred' : 'On-site or remote';
 
   const parts = [];
   parts.push('You are an objective AI career-transition evaluator for the Life Dashboard.');
@@ -87,10 +128,11 @@ function formatScoringPrompt_(job, profile) {
   parts.push('Evaluate strictly based on skills, experience requirements, education, location/work mode, and compensation.');
   parts.push('');
   parts.push('TARGET CANDIDATE PROFILE:');
-  parts.push('- Target Titles: ' + targetTitles);
-  parts.push('- Core Skills: ' + targetSkills);
-  parts.push('- Minimum Target Compensation: ' + minSalary);
-  parts.push('- Remote Preference: ' + remotePref);
+  parts.push('- Target Titles: ' + targetTitles.join(', '));
+  parts.push('- Required: ' + reqSkills.join(', '));
+  parts.push('- Optional: ' + optSkills.join(', '));
+  parts.push(`- Min Hourly: $${minHourly || 'N/A'} / Min Annual: $${minAnnual || 'N/A'}`);
+  parts.push('- Remote: ' + remotePref);
   parts.push('');
   parts.push('JOB POSTING:');
   parts.push('- Title: ' + (job.title || ''));
@@ -130,18 +172,25 @@ function calculateCostUsd_(inputTokens, outputTokens) {
 function checkAndReserveMonthlyBudgetInDb_(ss, jobId, runId, profileVersion) {
   const usageRows = readRows_(ss, 'AIUsage');
   const now = new Date();
-  const currentYear = now.getUTCFullYear();
-  const currentMonth = now.getUTCMonth();
+  const currentYM = getNewYorkYearMonth_(now);
 
   let currentSpend = 0;
   usageRows.forEach(function (r) {
     if (!r.request_started_at) return;
     const reqDate = new Date(r.request_started_at);
     if (isNaN(reqDate.getTime())) return;
-    if (reqDate.getUTCFullYear() === currentYear && reqDate.getUTCMonth() === currentMonth) {
-      const cost = typeof r.estimated_cost === 'number' ? r.estimated_cost : parseFloat(r.estimated_cost);
-      if (!isNaN(cost)) {
-        currentSpend += cost;
+    if (getNewYorkYearMonth_(reqDate) === currentYM) {
+      // Sum all completed items or unresolved reservations
+      if (r.status === 'Completed' && r.operation === 'reconcile') {
+        const cost = typeof r.estimated_cost === 'number' ? r.estimated_cost : parseFloat(r.estimated_cost);
+        if (!isNaN(cost)) currentSpend += cost;
+      } else if (r.status === 'Reserved') {
+        // Also check if this reservation was reconciled later
+        const reconciled = usageRows.some(row => row.run_id === r.run_id && row.job_id === r.job_id && row.operation === 'reconcile');
+        if (!reconciled) {
+          const cost = typeof r.estimated_cost === 'number' ? r.estimated_cost : parseFloat(r.estimated_cost);
+          if (!isNaN(cost)) currentSpend += cost;
+        }
       }
     }
   });
@@ -176,26 +225,51 @@ function checkAndReserveMonthlyBudgetInDb_(ss, jobId, runId, profileVersion) {
 }
 
 /**
- * Reconciles the reservation record with actual token counts and final status.
+ * Reconciles the reservation record by APPENDING a new row with operation 'reconcile'
+ * instead of mutating. (FIXED F9)
  */
 function reconcileUsageInDb_(ss, reservationId, inputTokens, outputTokens, status, errorCode) {
   const actualCost = calculateCostUsd_(inputTokens, outputTokens);
-  return updateRecordByIdInDb_(ss, 'AIUsage', reservationId, {
+  // Get original reservation info
+  const reservations = readRows_(ss, 'AIUsage').filter(r => r.id === reservationId);
+  const res = reservations.length > 0 ? reservations[0] : {};
+
+  // Append new row mapping back to the same run/job ID but marking 'reconcile'
+  return appendRecordInDb_(ss, 'AIUsage', {
+        run_id: res.run_id,
+    job_id: res.job_id,
+    provider: res.provider,
+    model: res.model,
+    operation: 'reconcile',
+    profile_version: res.profile_version,
+    prompt_version: res.prompt_version,
+    request_started_at: res.request_started_at,
+    request_finished_at: new Date(),
     input_tokens: inputTokens,
     output_tokens: outputTokens,
     estimated_cost: actualCost,
+    currency: 'USD',
     status: status,
-    request_finished_at: new Date(),
     error_code: errorCode || ''
   });
 }
 
 /**
  * Validates the model output against scoring rules and quarantine policies.
+ * FIXED R1: Reject unknown keys, validate evidence grounding.
+ * FIXED R2: Deterministic score calculation.
  */
 function validateScoringOutput_(parsed, rawDescription) {
   if (!parsed || typeof parsed !== 'object') {
     return { valid: false, errorCode: 'INVALID_OBJECT' };
+  }
+
+  // FIXED R1: Check for unknown fields
+  const allowedKeys = ['skills_match', 'experience_match', 'education_match', 'location_match', 'salary_match', 'overall_match', 'recommendation', 'evidence', 'gaps'];
+  for (let k in parsed) {
+    if (allowedKeys.indexOf(k) === -1) {
+      return { valid: false, errorCode: 'UNKNOWN_FIELD' };
+    }
   }
 
   const numericFields = [
@@ -215,7 +289,7 @@ function validateScoringOutput_(parsed, rawDescription) {
     return { valid: false, errorCode: 'INVALID_RECOMMENDATION' };
   }
 
-  // Ensure overall match corresponds reasonably to component weights
+  // FIXED R2: Deterministic score computation
   // Weighted: Skills 35%, Experience 25%, Education 10%, Location 15%, Salary 15%
   const computedOverall = Math.round(
     parsed.skills_match * 0.35 +
@@ -225,26 +299,33 @@ function validateScoringOutput_(parsed, rawDescription) {
     parsed.salary_match * 0.15
   );
 
-  // If model overall differs by more than 15 points from deterministic calculation, override or flag
-  const finalOverall = Math.abs(parsed.overall_match - computedOverall) <= 15
-    ? parsed.overall_match
-    : computedOverall;
+  const finalOverall = computedOverall; // Hard override.
+  let derivedRecommendation = 'Not a Match';
+  if (computedOverall >= 80) derivedRecommendation = 'Strong Match';
+  else if (computedOverall >= 60) derivedRecommendation = 'Possible Match';
 
-  // Validate and sanitize evidence and gaps
-  const rawEvidence = Array.isArray(parsed.evidence) ? parsed.evidence : [];
-  const rawGaps = Array.isArray(parsed.gaps) ? parsed.gaps : [];
+  // FIXED R1: Grounding check
+  const descWords = (rawDescription || '').toLowerCase().match(/\b\w+\b/g) || [];
+  const descWordSet = {};
+  for(let w of descWords) if(w.length > 3) descWordSet[w] = true;
 
-  const sanitizedEvidence = rawEvidence
-    .slice(0, MAX_EVIDENCE_ITEMS_)
-    .map(function (item) {
-      return escapeSheetFormula_(String(item).slice(0, MAX_ITEM_LENGTH_).trim());
+  const validateGrounding = (items) => {
+    return (Array.isArray(items) ? items : []).slice(0, MAX_EVIDENCE_ITEMS_).map(item => {
+      const itemStr = String(item).slice(0, MAX_ITEM_LENGTH_).trim();
+      const itemWords = itemStr.toLowerCase().match(/\b\w+\b/g) || [];
+      let grounded = false;
+      for (let w of itemWords) {
+        if (w.length > 3 && descWordSet[w]) {
+          grounded = true;
+          break;
+        }
+      }
+      return escapeSheetFormula_(!grounded ? `[UNGROUNDED] ${itemStr}` : itemStr);
     });
+  };
 
-  const sanitizedGaps = rawGaps
-    .slice(0, MAX_GAP_ITEMS_)
-    .map(function (item) {
-      return escapeSheetFormula_(String(item).slice(0, MAX_ITEM_LENGTH_).trim());
-    });
+  const sanitizedEvidence = validateGrounding(parsed.evidence);
+  const sanitizedGaps = validateGrounding(parsed.gaps);
 
   return {
     valid: true,
@@ -254,8 +335,9 @@ function validateScoringOutput_(parsed, rawDescription) {
       education_match: Math.round(parsed.education_match),
       location_match: Math.round(parsed.location_match),
       salary_match: Math.round(parsed.salary_match),
+      model_overall_match: parsed.overall_match, // Stored for diagnostic purposes
       overall_match: finalOverall,
-      recommendation: parsed.recommendation,
+      recommendation: derivedRecommendation, // Derived deterministically
       evidence: sanitizedEvidence,
       gaps: sanitizedGaps
     }
@@ -271,28 +353,24 @@ function validateScoringOutput_(parsed, rawDescription) {
  * @returns {Object} { status: 'scored' | 'cached' | 'quarantined', scoreId }
  */
 function scoreSingleJobInDb_(ss, job, runId) {
-  const profile = typeof JOB_PROFILE_ !== 'undefined' ? JOB_PROFILE_ : {
-    configVersion: '1.0.0',
-    titles: ['Help Desk Specialist', 'IT Support Analyst'],
-    skills: ['Troubleshooting', 'Customer Service'],
-    minSalary: 45000,
-    remote: true
-  };
-  const profileVersion = profile.configVersion || '1.0.0';
-
+  const profile = typeof JOB_PROFILE_ !== 'undefined' ? JOB_PROFILE_ : { configVersion: 1 };
+  const profileVersion = (profile && profile.configVersion) ? profile.configVersion.toString() : '1.0.0';
   const descHash = computeJobDescriptionHash_(job.description);
 
-  // Check cache identity
+  // FIXED R5: Check cache identity properly (all components)
   const existingScores = readRows_(ss, 'JobScores').filter(function (s) {
     return s.job_id === job.id &&
       s.job_description_hash === descHash &&
+      s.profile_version === profileVersion &&
+      s.prompt_version === PROMPT_VERSION_ &&
+      s.schema_version === SCORING_SCHEMA_VERSION_ &&
+      s.provider === 'Google Gemini' &&
       s.model === GEMINI_MODEL_ &&
       s.status === 'Validated';
   });
 
   if (existingScores.length > 0) {
     const cached = existingScores[0];
-    // Sync to Jobs row if Jobs row was missing match score
     if (job.overall_match === '' || job.overall_match === undefined || job.overall_match === null) {
       updateRecordByIdInDb_(ss, 'Jobs', job.id, {
         skills_match: cached.skills_match,
@@ -308,7 +386,6 @@ function scoreSingleJobInDb_(ss, job, runId) {
     return { status: 'cached', scoreId: cached.id };
   }
 
-  // Budget reservation
   const reservationId = checkAndReserveMonthlyBudgetInDb_(ss, job.id, runId, profileVersion);
 
   const promptText = formatScoringPrompt_(job, profile);
@@ -322,7 +399,10 @@ function scoreSingleJobInDb_(ss, job, runId) {
   }
 
   if (callError) {
-    reconcileUsageInDb_(ss, reservationId, 0, 0, 'Failed', callError.code || 'API_ERROR');
+    // Post-dispatch failure: token charge applies if available
+    const inT = (callError.inputTokens !== undefined) ? callError.inputTokens : (providerResult && providerResult.inputTokens) || 0;
+    const outT = (callError.outputTokens !== undefined) ? callError.outputTokens : (providerResult && providerResult.outputTokens) || 0;
+    reconcileUsageInDb_(ss, reservationId, inT, outT, 'Failed', callError.code || 'API_ERROR');
     throw callError;
   }
 
@@ -394,7 +474,6 @@ function scoreSingleJobInDb_(ss, job, runId) {
     error_code: ''
   });
 
-  // Update Jobs table with validated scores
   updateRecordByIdInDb_(ss, 'Jobs', job.id, {
     skills_match: vData.skills_match,
     experience_match: vData.experience_match,
@@ -412,9 +491,6 @@ function scoreSingleJobInDb_(ss, job, runId) {
 /**
  * Public entry point to score unscored or changed jobs.
  * Bounded by MAX_CANDIDATES_PER_RUN_ and monthly budget ceiling.
- *
- * @param {number} maxCandidates - Optional max candidates to score (default 10).
- * @returns {Object} Summary of scoring batch { attempted, scored, cached, quarantined, failed }
  */
 function scorePendingJobs(maxCandidates) {
   const limit = typeof maxCandidates === 'number' && maxCandidates > 0
@@ -426,12 +502,32 @@ function scorePendingJobs(maxCandidates) {
     const runId = 'score_run_' + new Date().getTime();
     const allJobs = readRows_(ss, 'Jobs');
 
-    // Only score unscored or newly saved jobs that have descriptions
+    // FIXED F7: Include jobs without score, or those whose score is out of date.
+    // wait, F7 said "Fix rescore eligibility to select jobs with no score or no validated score matching current identity".
+    // We can just rely on `overall_match === ''` if we clear it when they change, or we can select all "New" etc.
     const eligibleJobs = allJobs.filter(function (j) {
       if (!j.description || String(j.description).trim().length === 0) return false;
-      const unscored = j.overall_match === '' || j.overall_match === undefined || j.overall_match === null;
       const eligibleStatus = ['New', 'Reviewed', 'Saved', 'Ready to Apply'].indexOf(j.status) !== -1;
-      return unscored && eligibleStatus;
+      const unscored = j.overall_match === '' || j.overall_match === undefined || j.overall_match === null;
+
+      let needsRescore = false;
+      if (!unscored) {
+        const scores = readRows_(ss, 'JobScores').filter(s => s.job_id === j.id && s.status === 'Validated');
+        const descHash = computeJobDescriptionHash_(j.description);
+        const profile = typeof JOB_PROFILE_ !== 'undefined' ? JOB_PROFILE_ : { configVersion: 1 };
+        const profileVersion = (profile && profile.configVersion) ? profile.configVersion.toString() : '1.0.0';
+
+        const hasValidScore = scores.some(s =>
+          s.job_description_hash === descHash &&
+          s.profile_version === profileVersion &&
+          s.prompt_version === PROMPT_VERSION_ &&
+          s.schema_version === SCORING_SCHEMA_VERSION_ &&
+          s.provider === 'Google Gemini' &&
+          s.model === GEMINI_MODEL_
+        );
+        if (!hasValidScore) needsRescore = true;
+      }
+      return eligibleStatus && (unscored || needsRescore);
     }).slice(0, limit);
 
     const summary = {
@@ -452,7 +548,6 @@ function scorePendingJobs(maxCandidates) {
         else if (res.status === 'quarantined') summary.quarantined++;
       } catch (err) {
         summary.failed++;
-        // If budget is exceeded, stop remaining candidates in this batch
         if (err && err.code === 'BUDGET_EXCEEDED') {
           summary.stoppedReason = 'BUDGET_EXCEEDED';
           break;
@@ -466,14 +561,12 @@ function scorePendingJobs(maxCandidates) {
 
 /**
  * Public read-only helper to inspect current month AI budget status.
- * Zero external calls, zero cost.
  */
 function getScoringBudgetStatus() {
   const ss = getDb_();
   const usageRows = readRows_(ss, 'AIUsage');
   const now = new Date();
-  const currentYear = now.getUTCFullYear();
-  const currentMonth = now.getUTCMonth();
+  const currentYM = getNewYorkYearMonth_(now);
 
   let currentSpend = 0;
   let currentCalls = 0;
@@ -482,11 +575,19 @@ function getScoringBudgetStatus() {
     if (!r.request_started_at) return;
     const reqDate = new Date(r.request_started_at);
     if (isNaN(reqDate.getTime())) return;
-    if (reqDate.getUTCFullYear() === currentYear && reqDate.getUTCMonth() === currentMonth) {
-      currentCalls++;
-      const cost = typeof r.estimated_cost === 'number' ? r.estimated_cost : parseFloat(r.estimated_cost);
-      if (!isNaN(cost)) {
-        currentSpend += cost;
+
+    if (getNewYorkYearMonth_(reqDate) === currentYM) {
+      // Sum all completed items or unresolved reservations
+      if (r.status === 'Completed' && r.operation === 'reconcile') {
+        currentCalls++;
+        const cost = typeof r.estimated_cost === 'number' ? r.estimated_cost : parseFloat(r.estimated_cost);
+        if (!isNaN(cost)) currentSpend += cost;
+      } else if (r.status === 'Reserved') {
+        const reconciled = usageRows.some(row => row.run_id === r.run_id && row.job_id === r.job_id && row.operation === 'reconcile');
+        if (!reconciled) {
+          const cost = typeof r.estimated_cost === 'number' ? r.estimated_cost : parseFloat(r.estimated_cost);
+          if (!isNaN(cost)) currentSpend += cost;
+        }
       }
     }
   });

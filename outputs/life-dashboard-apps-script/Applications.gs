@@ -296,9 +296,11 @@ function createApplication(input) {
       const appId = input.id.trim();
       const existingById = findApplicationByIdOrNull_(ss, appId);
       if (existingById) {
-        const requestedStatus = input.status ? input.status.trim() : 'Draft';
-        if (existingById.job_id === jobId && existingById.status === requestedStatus) {
-          return existingById;
+        // Defect F12 fix: idempotent replay should succeed if job_id matches and status matches (or was omitted on retry)
+        if (existingById.job_id === jobId) {
+          if (!input.status || existingById.status === input.status.trim()) {
+            return existingById;
+          }
         }
         throw UserError_('A record with this id already exists.', 'DUPLICATE_ID');
       }
@@ -412,7 +414,11 @@ function setApplicationStatus(applicationId, targetStatus, note) {
       appUpdates.applied_at = new Date();
     }
 
-    const updatedApp = updateRecordByIdInDb_(ss, 'Applications', appId, appUpdates);
+    const updatedApp = updateRecordByIdInDb_(ss, 'Applications', appId, appUpdates, function (fresh) {
+      if (fresh.status !== current.status) {
+        throw UserError_('This application changed before the request completed. Refresh and try again.', 'CONFLICT');
+      }
+    });
 
     appendRecordInDb_(ss, 'ApplicationHistory', {
       application_id: appId,
@@ -568,7 +574,11 @@ function updateApplication(applicationId, updates) {
       toWrite.applied_at = validateApplicationDate_(updates.applied_at, 'Applied date');
     }
 
-    const updated = updateRecordByIdInDb_(ss, 'Applications', appId, toWrite);
+    const updated = updateRecordByIdInDb_(ss, 'Applications', appId, toWrite, function (fresh) {
+      if (fresh.status !== current.status) {
+        throw UserError_('This application changed before the request completed. Refresh and try again.', 'CONFLICT');
+      }
+    });
 
     appendRecordInDb_(ss, 'ApplicationHistory', {
       application_id: appId,
