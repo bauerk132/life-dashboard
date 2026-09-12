@@ -194,6 +194,12 @@ function jobDedupeComputeContentHash_(source, company, title, location) {
  * @returns {boolean}
  */
 function jobDedupeNormalizeRemoteForStorage_(rawRemote) {
+  // Phase 4A's frozen JSearch adapter already returns the normalized
+  // {value, label} shape. Keep support for the raw boolean/string contract
+  // as well, because deterministic unit fixtures exercise both boundaries.
+  if (rawRemote && typeof rawRemote === 'object' && typeof rawRemote.value === 'boolean') {
+    return rawRemote.value;
+  }
   return normalizeRemote_(rawRemote).value;
 }
 

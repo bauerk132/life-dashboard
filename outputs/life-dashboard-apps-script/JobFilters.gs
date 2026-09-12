@@ -1,306 +1,266 @@
 'use strict';
 
 /**
- * Life Dashboard — Job Filters (Phase 4B)
+ * Phase 4B deterministic hard filters.
  *
- * Implements deterministic hard filtering against the user-approved
- * job profile 'phase4-job-profile-v1-2026-09-11'.
- *
- * Evaluates candidate records in a stable, documented order:
- * 1. Hard Exclusions (commission-only, sales, door-to-door, commercial driving/CDL, clearance, medical).
- * 2. Target Role Priorities (Priority 1: IT support/helpdesk, Priority 2: Admin/Ops, Priority 3: Non-sales customer support).
- * 3. Geography & Remote Rules (< 8 miles from Downtown Pittsburgh for onsite/hybrid; PA eligible for remote).
- * 4. Compensation Floor ($19.00/hr or $39,520/yr when stated; unknown is accepted).
- *
- * All functions are private with a trailing underscore (_) to prevent
- * accidental browser exposure.
+ * This file never searches the web and never scores a candidate. It applies
+ * the approved profile in a stable exclusion order and returns auditable
+ * reason codes. A title-track miss is reviewable, not a hard exclusion.
  */
 
 const JOB_FILTERS_PROFILE_ID_ = 'phase4-job-profile-v1-2026-09-11';
-const JOB_FILTERS_VERSION_ = '4B.1';
+const JOB_FILTERS_VERSION_ = 'jobfilters-v2';
 
-// Pittsburgh reference point: Downtown Pittsburgh, PA
-const PITTSBURGH_DOWNTOWN_LAT_ = 40.4406;
-const PITTSBURGH_DOWNTOWN_LON_ = -79.9959;
-const MAX_ON_SITE_RADIUS_MILES_ = 8.0;
-
-// Compensation floor
-const MIN_HOURLY_RATE_ = 19.0;
-const MIN_ANNUAL_SALARY_ = 39520.0; // 19.00 * 2080 hours
-
-/**
- * Hard exclusion patterns. If matched in title or description, the job is rejected immediately.
- */
-const EXCLUDED_PATTERNS_ = Object.freeze([
-  {
-    regex: /\b(commission\s*(?:only|based)|100%\s*commission|door[\s-]to[\s-]door|cold\s*call(?:ing)?|canvass(?:er|ing)?)\b/i,
-    reason: 'EXCLUDED_COMMISSION_OR_CANVASSING'
-  },
-  {
-    regex: /\b(commercial\s*driver|cdl[\s-]?a|cdl[\s-]?b|truck\s*driver|delivery\s*driver|route\s*driver|courier)\b/i,
-    reason: 'EXCLUDED_COMMERCIAL_DRIVING'
-  },
-  {
-    regex: /\b(active\s*(?:top\s*secret|ts[\s\/]sci|secret)\s*clearance|polygraph\s*required)\b/i,
-    reason: 'EXCLUDED_SECURITY_CLEARANCE'
-  },
-  {
-    regex: /\b(physician|registered\s*nurse|\brn\b|nurse\s*practitioner|pharmacist|dental\s*hygienist)\b/i,
-    reason: 'EXCLUDED_MEDICAL_LICENSING'
-  },
-  {
-    regex: /\b(account\s*executive|sales\s*representative|sales\s*agent|insurance\s*agent|financial\s*advisor)\b/i,
-    reason: 'EXCLUDED_SALES_ROLE'
-  }
-]);
-
-/**
- * Role matching patterns grouped by priority.
- */
-const PRIORITY_1_PATTERNS_ = Object.freeze([
-  /\b(?:it|information\s*technology)\s*(?:support|technician|specialist|analyst|associate)\b/i,
-  /\b(?:help|service)\s*desk\b/i,
-  /\bdesktop\s*support\b/i,
-  /\btechnical\s*support\b/i,
-  /\b(?:end[\s-]user|user|pc)\s*support\b/i,
-  /\btech\s*support\b/i
-]);
-
-const PRIORITY_2_PATTERNS_ = Object.freeze([
-  /\boffice\s*(?:administrator|coordinator|assistant|manager)\b/i,
-  /\badministrative\s*(?:coordinator|assistant|specialist)\b/i,
-  /\boperations\s*(?:coordinator|support|assistant|specialist)\b/i,
-  /\blogistics\s*(?:coordinator|support|specialist)\b/i
-]);
-
-const PRIORITY_3_PATTERNS_ = Object.freeze([
-  /\bcustomer\s*(?:support|service|care)\s*(?:representative|specialist|agent|associate)\b/i,
-  /\bclient\s*support\s*(?:specialist|representative)\b/i,
-  /\bmember\s*support\s*representative\b/i,
-  /\bstore\s*support\s*specialist\b/i,
-  /\bcustomer\s*success\s*(?:agent|representative)\b/i
-]);
-
-/**
- * Calculates great-circle distance in miles between two coordinates using Haversine formula.
- *
- * @param {number} lat1
- * @param {number} lon1
- * @param {number} lat2
- * @param {number} lon2
- * @returns {number} Distance in miles
- */
-function calculateDistanceMiles_(lat1, lon1, lat2, lon2) {
-  const R = 3958.8; // Earth radius in miles
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
+function jobFiltersText_(value) {
+  if (value === null || value === undefined) return '';
+  const text = String(value);
+  return text.charAt(0) === '\'' ? text.slice(1) : text;
 }
 
-/**
- * Determines target role priority for a job candidate.
- * Returns { priority: number, matched: boolean }
- *
- * @param {string} title
- * @param {string} description
- * @returns {{ priority: number, matched: boolean }}
- */
-function matchRolePriority_(title, description) {
-  const combined = (title + ' ' + (description || '')).toLowerCase();
-
-  for (let i = 0; i < PRIORITY_1_PATTERNS_.length; i++) {
-    if (PRIORITY_1_PATTERNS_[i].test(title) || PRIORITY_1_PATTERNS_[i].test(combined)) {
-      return { priority: 1, matched: true };
-    }
-  }
-
-  for (let j = 0; j < PRIORITY_2_PATTERNS_.length; j++) {
-    if (PRIORITY_2_PATTERNS_[j].test(title) || PRIORITY_2_PATTERNS_[j].test(combined)) {
-      return { priority: 2, matched: true };
-    }
-  }
-
-  for (let k = 0; k < PRIORITY_3_PATTERNS_.length; k++) {
-    if (PRIORITY_3_PATTERNS_[k].test(title) || PRIORITY_3_PATTERNS_[k].test(combined)) {
-      // Rule: Customer support must not be sales/quota carrying
-      if (/\b(?:sales|commission|quota|cold\s*call|lead\s*generation)\b/i.test(combined)) {
-        return { priority: 3, matched: false, reason: 'EXCLUDED_SALES_IN_CUSTOMER_SUPPORT' };
-      }
-      return { priority: 3, matched: true };
-    }
-  }
-
-  return { priority: 0, matched: false };
+function jobFiltersNormalize_(value) {
+  return jobFiltersText_(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-/**
- * Checks geographic eligibility for onsite/hybrid/remote jobs.
- *
- * @param {Object} candidate
- * @returns {{ eligible: boolean, reason: string|null }}
- */
-function checkGeographyEligibility_(candidate) {
-  const isRemote = Boolean(candidate.remote);
-  const loc = (candidate.location || '').toLowerCase();
-  const desc = (candidate.description || '').toLowerCase();
-
-  if (isRemote) {
-    // If explicitly remote, check that Pennsylvania is not excluded
-    const excludesPA = /\b(?:excluding\s+pa|not\s+eligible\s+(?:in|for)\s+pa|excludes\s+pennsylvania)\b/i.test(desc);
-    if (excludesPA) {
-      return { eligible: false, reason: 'REMOTE_EXCLUDES_PENNSYLVANIA' };
-    }
-    return { eligible: true, reason: null };
-  }
-
-  // On-site or Hybrid: Coordinates check if available
-  if (typeof candidate.latitude === 'number' && typeof candidate.longitude === 'number') {
-    const dist = calculateDistanceMiles_(
-      PITTSBURGH_DOWNTOWN_LAT_,
-      PITTSBURGH_DOWNTOWN_LON_,
-      candidate.latitude,
-      candidate.longitude
-    );
-    if (dist > MAX_ON_SITE_RADIUS_MILES_) {
-      return { eligible: false, reason: 'DISTANCE_EXCEEDS_8_MILES' };
-    }
-    return { eligible: true, reason: null };
-  }
-
-  // Location string text heuristics
-  if (loc.indexOf('pittsburgh') !== -1 || loc.indexOf('allegheny') !== -1) {
-    return { eligible: true, reason: null };
-  }
-
-  // If outside known local boundaries
-  if (loc && loc.indexOf('pa') === -1 && loc.indexOf('pennsylvania') === -1) {
-    return { eligible: false, reason: 'LOCATION_OUTSIDE_TARGET_AREA' };
-  }
-
-  return { eligible: true, reason: null };
+function jobFiltersContainsTerm_(normalizedText, term) {
+  const normalizedTerm = jobFiltersNormalize_(term);
+  if (!normalizedText || !normalizedTerm) return false;
+  return (' ' + normalizedText + ' ').indexOf(' ' + normalizedTerm + ' ') !== -1;
 }
 
-/**
- * Checks compensation against floor when specified.
- *
- * @param {Object} candidate
- * @returns {{ eligible: boolean, reason: string|null }}
- */
-function checkCompensationFloor_(candidate) {
-  const currency = (candidate.currency || '').toUpperCase();
-  if (currency && currency !== 'USD') {
-    return { eligible: false, reason: 'NON_USD_CURRENCY' };
-  }
-
-  const min = typeof candidate.salary_min === 'number' ? candidate.salary_min : null;
-  const max = typeof candidate.salary_max === 'number' ? candidate.salary_max : null;
-
-  if (min !== null || max !== null) {
-    const val = max !== null ? max : min;
-    // Heuristic: hourly vs annual
-    if (val < 100) {
-      if (val < MIN_HOURLY_RATE_) {
-        return { eligible: false, reason: 'BELOW_HOURLY_SALARY_FLOOR' };
-      }
-    } else {
-      if (val < MIN_ANNUAL_SALARY_) {
-        return { eligible: false, reason: 'BELOW_ANNUAL_SALARY_FLOOR' };
-      }
-    }
-  }
-
-  // Unknown compensation is accepted for review
-  return { eligible: true, reason: null };
+function jobFiltersContainsAny_(normalizedText, terms) {
+  return terms.some(function (term) {
+    return jobFiltersContainsTerm_(normalizedText, term);
+  });
 }
 
-/**
- * Main evaluation function for a normalized job candidate.
- * Pure function.
- *
- * @param {Object} candidate - Normalized candidate from JobSource_JSearch
- * @returns {{
- *   passed: boolean,
- *   primaryReason: string,
- *   secondaryReasons: string[],
- *   priority: number,
- *   profileId: string
- * }}
- */
-function jobFiltersEvaluateCandidate_(candidate) {
-  if (!candidate || typeof candidate !== 'object') {
-    return {
-      passed: false,
-      primaryReason: 'INVALID_CANDIDATE',
-      secondaryReasons: [],
-      priority: 0,
-      profileId: JOB_FILTERS_PROFILE_ID_
-    };
+function jobFiltersUniquePush_(list, value) {
+  if (list.indexOf(value) === -1) list.push(value);
+}
+
+function jobFiltersRemoteValue_(rawRemote) {
+  if (rawRemote && typeof rawRemote === 'object' && typeof rawRemote.value === 'boolean') {
+    return rawRemote.value;
   }
+  return normalizeRemote_(rawRemote).value;
+}
 
-  const title = candidate.title || '';
-  const desc = candidate.description || '';
-  const secondary = [];
+function jobFiltersDistanceMiles_(lat1, lng1, lat2, lng2) {
+  const earthRadiusMiles = 3958.8;
+  const toRadians = Math.PI / 180;
+  const dLat = (lat2 - lat1) * toRadians;
+  const dLng = (lng2 - lng1) * toRadians;
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * toRadians) * Math.cos(lat2 * toRadians) *
+    Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return earthRadiusMiles * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
 
-  // Step 1: Hard Exclusions
-  for (let i = 0; i < EXCLUDED_PATTERNS_.length; i++) {
-    const p = EXCLUDED_PATTERNS_[i];
-    if (p.regex.test(title) || p.regex.test(desc)) {
-      return {
-        passed: false,
-        primaryReason: p.reason,
-        secondaryReasons: secondary,
-        priority: 0,
-        profileId: JOB_FILTERS_PROFILE_ID_
-      };
-    }
+function jobFiltersMatchTrack_(title, profile) {
+  const order = ['p1', 'p2', 'p3'];
+  for (let i = 0; i < order.length; i++) {
+    const key = order[i];
+    if (jobFiltersContainsAny_(title, profile.priorities[key].titleTerms)) return key;
   }
+  return null;
+}
 
-  // Step 2: Role Priority Match
-  const roleMatch = matchRolePriority_(title, desc);
-  if (!roleMatch.matched) {
-    return {
-      passed: false,
-      primaryReason: roleMatch.reason || 'ROLE_NOT_IN_PROFILE',
-      secondaryReasons: secondary,
-      priority: 0,
-      profileId: JOB_FILTERS_PROFILE_ID_
-    };
-  }
+function jobFiltersFailure_(reason, flags, track, profile) {
+  return {
+    passed: false,
+    primaryReason: reason,
+    secondaryReasons: flags.slice(),
+    reviewFlags: flags.slice(),
+    matchedTrack: track,
+    profileVersion: profile.profileId,
+    filterVersion: JOB_FILTERS_VERSION_
+  };
+}
 
-  // Step 3: Geography & Work Arrangement
-  const geoCheck = checkGeographyEligibility_(candidate);
-  if (!geoCheck.eligible) {
-    return {
-      passed: false,
-      primaryReason: geoCheck.reason,
-      secondaryReasons: secondary,
-      priority: roleMatch.priority,
-      profileId: JOB_FILTERS_PROFILE_ID_
-    };
-  }
-
-  // Step 4: Compensation Floor
-  const compCheck = checkCompensationFloor_(candidate);
-  if (!compCheck.eligible) {
-    return {
-      passed: false,
-      primaryReason: compCheck.reason,
-      secondaryReasons: secondary,
-      priority: roleMatch.priority,
-      profileId: JOB_FILTERS_PROFILE_ID_
-    };
-  }
-
+function jobFiltersSuccess_(flags, track, profile) {
   return {
     passed: true,
-    primaryReason: 'PASSED_PROFILE_FILTERS',
-    secondaryReasons: secondary,
-    priority: roleMatch.priority,
-    profileId: JOB_FILTERS_PROFILE_ID_
+    primaryReason: null,
+    secondaryReasons: flags.slice(),
+    reviewFlags: flags.slice(),
+    matchedTrack: track,
+    profileVersion: profile.profileId,
+    filterVersion: JOB_FILTERS_VERSION_
   };
+}
+
+function jobFiltersEmploymentDecision_(candidate, combinedText, flags) {
+  const rawTypes = Array.isArray(candidate.employment_types) ? candidate.employment_types : [];
+  const types = rawTypes.map(function (value) {
+    return jobFiltersNormalize_(value).replace(/ /g, '_').toUpperCase();
+  }).filter(Boolean);
+
+  if (types.length === 0) {
+    jobFiltersUniquePush_(flags, 'EMPLOYMENT_TYPE_UNSTATED');
+    return null;
+  }
+
+  const conversion = jobFiltersContainsAny_(combinedText, [
+    'contract to hire', 'contract-to-hire', 'temp to perm',
+    'temporary to permanent', 'conversion to full time'
+  ]);
+  const allowed = types.some(function (type) {
+    return type === 'FULLTIME' || type === 'FULL_TIME' || type === 'CONTRACT_TO_HIRE';
+  }) || conversion;
+  if (allowed) return null;
+
+  const disallowed = types.some(function (type) {
+    return [
+      'PARTTIME', 'PART_TIME', 'TEMP', 'TEMPORARY', 'SEASONAL',
+      'INTERN', 'INTERNSHIP', 'VOLUNTEER', 'CONTRACT', 'CONTRACTOR'
+    ].indexOf(type) !== -1;
+  });
+  return disallowed ? 'EXCLUDED_EMPLOYMENT_TYPE' : null;
+}
+
+function jobFiltersRemoteRestriction_(candidate, description, profile, flags) {
+  const requiredState = profile.locations.remoteRequiresState.toLowerCase();
+  const requiredName = requiredState === 'pa' ? 'pennsylvania' : requiredState;
+  const country = jobFiltersNormalize_(candidate.country);
+  if (country && ['us', 'usa', 'united states', 'united states of america'].indexOf(country) === -1) {
+    return 'EXCLUDED_REMOTE_JURISDICTION';
+  }
+
+  const text = jobFiltersText_(description).toLowerCase();
+  const stateToken = new RegExp('\\b(?:' + requiredState + '|' + requiredName + ')\\b', 'i');
+  const explicitlyExcluded = new RegExp(
+    '(?:excluding|except|not eligible in|cannot reside in|not available in)\\s+(?:the state of\\s+)?(?:' +
+      requiredState + '|' + requiredName + ')\\b|\\b(?:' + requiredState + '|' + requiredName +
+      ')\\b\\s+(?:residents?\\s+)?(?:are\\s+)?(?:not eligible|excluded)',
+    'i'
+  );
+  if (explicitlyExcluded.test(text)) return 'EXCLUDED_REMOTE_JURISDICTION';
+
+  const restriction = /(?:must reside|must live|eligible states?|available only in|authorized in(?: the following)? states?|residents? of)\b([^.;\n]{0,180})/i.exec(text);
+  if (restriction) {
+    const clause = restriction[0];
+    if (stateToken.test(clause) || /\b(?:united states|usa|nationwide)\b/i.test(clause)) return null;
+    return 'EXCLUDED_REMOTE_JURISDICTION';
+  }
+
+  jobFiltersUniquePush_(flags, 'REMOTE_JURISDICTION_UNSTATED');
+  return null;
+}
+
+function jobFiltersGeographyDecision_(candidate, description, profile, flags) {
+  if (jobFiltersRemoteValue_(candidate.remote)) {
+    return jobFiltersRemoteRestriction_(candidate, description, profile, flags);
+  }
+
+  const lat = candidate.latitude;
+  const lng = candidate.longitude;
+  if (typeof lat !== 'number' || !isFinite(lat) || typeof lng !== 'number' || !isFinite(lng)) {
+    jobFiltersUniquePush_(flags, 'MISSING_COORDINATES');
+    return null;
+  }
+  const distance = jobFiltersDistanceMiles_(
+    profile.locations.center.lat,
+    profile.locations.center.lng,
+    lat,
+    lng
+  );
+  // The approved boundary is strictly less than eight miles.
+  return distance >= profile.locations.radiusMiles ? 'EXCLUDED_OUTSIDE_RADIUS' : null;
+}
+
+function jobFiltersCompensationDecision_(candidate, profile, flags) {
+  const min = typeof candidate.salary_min === 'number' && isFinite(candidate.salary_min)
+    ? candidate.salary_min : null;
+  const max = typeof candidate.salary_max === 'number' && isFinite(candidate.salary_max)
+    ? candidate.salary_max : null;
+  if (min === null && max === null) return null;
+
+  if (candidate.salary_source !== 'provider') {
+    jobFiltersUniquePush_(flags, 'COMPENSATION_ESTIMATE_REVIEW');
+    return null;
+  }
+  if (jobFiltersText_(candidate.currency).toUpperCase() !== 'USD') {
+    jobFiltersUniquePush_(flags, 'COMPENSATION_UNIT_UNCLEAR');
+    return null;
+  }
+
+  const period = jobFiltersText_(candidate.salary_period).toUpperCase();
+  let floor;
+  if (period === 'HOUR' || period === 'HOURLY') {
+    floor = profile.compensation.minHourlyUsd;
+  } else if (period === 'YEAR' || period === 'ANNUAL' || period === 'YEARLY') {
+    floor = profile.compensation.minAnnualUsd;
+  } else {
+    jobFiltersUniquePush_(flags, 'COMPENSATION_UNIT_UNCLEAR');
+    return null;
+  }
+
+  const lower = min !== null ? min : max;
+  const upper = max !== null ? max : min;
+  if (upper < floor) return 'EXCLUDED_COMPENSATION';
+  if (lower < floor && upper >= floor) {
+    jobFiltersUniquePush_(flags, 'COMPENSATION_RANGE_STRADDLES_MINIMUM');
+  }
+  return null;
+}
+
+/**
+ * Applies the frozen Phase 4 profile to one normalized source candidate.
+ *
+ * Exclusion order:
+ * senior leadership, sales, general manager, kitchen manager, driving,
+ * heavy travel, relocation, employment type, geography, compensation.
+ */
+function filterJobCandidate_(candidate, profile) {
+  const activeProfile = profile || JOB_PROFILE_;
+  jobProfileValidate_(activeProfile);
+  const flags = [];
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+    return jobFiltersFailure_('INVALID_CANDIDATE', flags, null, activeProfile);
+  }
+
+  const title = jobFiltersNormalize_(candidate.title);
+  const description = jobFiltersNormalize_(candidate.description);
+  const combined = (title + ' ' + description).trim();
+  if (!title) return jobFiltersFailure_('INVALID_CANDIDATE', flags, null, activeProfile);
+
+  const exclusions = activeProfile.exclusionTerms;
+  if (jobFiltersContainsAny_(title, exclusions.seniorLeadership)) {
+    return jobFiltersFailure_('EXCLUDED_SENIOR_LEADERSHIP', flags, null, activeProfile);
+  }
+  if (jobFiltersContainsAny_(title, exclusions.sales.titleTerms) ||
+      jobFiltersContainsAny_(description, exclusions.sales.dutyPhrases)) {
+    return jobFiltersFailure_('EXCLUDED_SALES', flags, null, activeProfile);
+  }
+  if (jobFiltersContainsAny_(title, exclusions.generalManager)) {
+    return jobFiltersFailure_('EXCLUDED_GENERAL_MANAGER', flags, null, activeProfile);
+  }
+  if (jobFiltersContainsAny_(title, exclusions.kitchenManager)) {
+    return jobFiltersFailure_('EXCLUDED_KITCHEN_MANAGER', flags, null, activeProfile);
+  }
+  if (jobFiltersContainsAny_(combined, exclusions.drivingDuty)) {
+    return jobFiltersFailure_('EXCLUDED_DRIVING', flags, null, activeProfile);
+  }
+  if (jobFiltersContainsAny_(combined, exclusions.heavyTravel)) {
+    return jobFiltersFailure_('EXCLUDED_HEAVY_TRAVEL', flags, null, activeProfile);
+  }
+  if (jobFiltersContainsAny_(combined, exclusions.relocation)) {
+    return jobFiltersFailure_('EXCLUDED_RELOCATION', flags, null, activeProfile);
+  }
+
+  let reason = jobFiltersEmploymentDecision_(candidate, combined, flags);
+  if (reason) return jobFiltersFailure_(reason, flags, null, activeProfile);
+
+  reason = jobFiltersGeographyDecision_(candidate, description, activeProfile, flags);
+  if (reason) return jobFiltersFailure_(reason, flags, null, activeProfile);
+
+  reason = jobFiltersCompensationDecision_(candidate, activeProfile, flags);
+  if (reason) return jobFiltersFailure_(reason, flags, null, activeProfile);
+
+  const track = jobFiltersMatchTrack_(title, activeProfile);
+  if (!track) jobFiltersUniquePush_(flags, 'NO_MATCHED_TRACK');
+  return jobFiltersSuccess_(flags, track, activeProfile);
 }

@@ -569,12 +569,16 @@ function updateRecordByKeyInDb_(ss, sheetName, keyField, keyValue, updates, prec
     const range = sheet.getRange(2, 1, lastRow - 1, fields.length);
     const data = range.getValues();
 
+    // Sheets can coerce numbers/dates while callers commonly use strings.
+    // Natural keys are identifiers, so compare their stable string forms
+    // rather than relying on realm- or storage-specific value types.
+    const normalizedKeyValue = String(keyValue);
     const matches = [];
     for (let i = 0; i < data.length; i++) {
       const row = data[i];
       const isBlank = row.every(function (v) { return v === '' || v === null || v === undefined; });
       if (isBlank) continue;
-      if (row[keyIndex] === keyValue) matches.push(i);
+      if (String(row[keyIndex]) === normalizedKeyValue) matches.push(i);
     }
 
     if (matches.length === 0) {
@@ -610,7 +614,9 @@ function updateRecordByKeyInDb_(ss, sheetName, keyField, keyValue, updates, prec
     });
 
     sheet.getRange(sheetRow, 1, 1, fields.length).setValues([rowValues]);
-    return readRows_(ss, sheetName).filter(function (r) { return r[keyField] === keyValue; })[0];
+    return readRows_(ss, sheetName).filter(function (r) {
+      return String(r[keyField]) === normalizedKeyValue;
+    })[0];
 }
 
 /**

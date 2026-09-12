@@ -163,31 +163,47 @@ function jobProfileValidate_(profile) {
   function fail(msg) {
     throw new Error('jobProfileValidate_: ' + msg);
   }
-  function isNonEmptyString(v) {
-    return typeof v === 'string' && v.length > 0;
+  function isBoundedString(v, maxLength) {
+    return typeof v === 'string' && v === v.trim() && v.length > 0 && v.length <= maxLength;
   }
   function isFiniteNumber(v) {
     return typeof v === 'number' && isFinite(v);
   }
-  function isStringArray(v) {
-    return Array.isArray(v) && v.every(function (item) { return typeof item === 'string'; });
+  function validateStringArray(path, value, options) {
+    options = options || {};
+    const maxItems = options.maxItems || 100;
+    const maxLength = options.maxLength || 120;
+    if (!Array.isArray(value) || value.length > maxItems || (options.required && value.length === 0)) {
+      fail(path + ' must be a bounded' + (options.required ? ' non-empty' : '') + ' string array');
+    }
+    const seen = {};
+    value.forEach(function (item, index) {
+      if (!isBoundedString(item, maxLength)) fail(path + '[' + index + '] is invalid');
+      const normalized = item.toLowerCase();
+      if (options.lowercase && item !== normalized) fail(path + '[' + index + '] must be lowercase');
+      if (seen[normalized]) fail(path + ' contains a duplicate term: ' + normalized);
+      seen[normalized] = true;
+    });
   }
   function validatePriority(name, node) {
     if (!node || typeof node !== 'object') fail('priorities.' + name + ' must be an object');
-    if (!isStringArray(node.titleTerms) || node.titleTerms.length === 0) {
-      fail('priorities.' + name + '.titleTerms must be a non-empty array of strings');
+    validateStringArray('priorities.' + name + '.titleTerms', node.titleTerms, {
+      required: true, lowercase: true, maxItems: 50
+    });
+  }
+  function requireInteger(path, value, min, max) {
+    if (!Number.isInteger(value) || value < min || value > max) {
+      fail(path + ' must be an integer from ' + min + ' through ' + max);
     }
   }
 
   if (!profile || typeof profile !== 'object') {
     fail('profile must be an object');
   }
-  if (!isNonEmptyString(profile.profileId)) {
-    fail('profileId must be a non-empty string');
+  if (!isBoundedString(profile.profileId, 100)) {
+    fail('profileId must be a trimmed non-empty string of 100 characters or fewer');
   }
-  if (typeof profile.configVersion !== 'number' || profile.configVersion < 0) {
-    fail('configVersion must be a non-negative number');
-  }
+  requireInteger('configVersion', profile.configVersion, 1, 1000000);
 
   if (!profile.priorities || typeof profile.priorities !== 'object') {
     fail('priorities must be an object with p1/p2/p3 entries');
@@ -202,16 +218,24 @@ function jobProfileValidate_(profile) {
       !isFiniteNumber(locations.center.lat) || !isFiniteNumber(locations.center.lng)) {
     fail('locations.center must be an object with finite lat/lng numbers');
   }
-  if (!isFiniteNumber(locations.radiusMiles) || locations.radiusMiles <= 0) {
-    fail('locations.radiusMiles must be a positive number');
+  if (locations.center.lat < -90 || locations.center.lat > 90 ||
+      locations.center.lng < -180 || locations.center.lng > 180) {
+    fail('locations.center coordinates are outside valid ranges');
   }
-  if (!isNonEmptyString(locations.remoteRequiresState)) {
-    fail('locations.remoteRequiresState must be a non-empty string');
+  if (!isFiniteNumber(locations.radiusMiles) || locations.radiusMiles <= 0 || locations.radiusMiles > 100) {
+    fail('locations.radiusMiles must be greater than 0 and at most 100');
+  }
+  if (!isBoundedString(locations.remoteRequiresState, 2) ||
+      locations.remoteRequiresState !== locations.remoteRequiresState.toUpperCase()) {
+    fail('locations.remoteRequiresState must be a two-letter uppercase state code');
   }
 
   if (!profile.workMode || typeof profile.workMode !== 'object') {
     fail('workMode must be an object');
   }
+  ['remotePreferred', 'onsiteAcceptable', 'hybridAcceptable'].forEach(function (key) {
+    if (typeof profile.workMode[key] !== 'boolean') fail('workMode.' + key + ' must be boolean');
+  });
 
   var comp = profile.compensation;
   if (!comp || typeof comp !== 'object' ||
@@ -222,15 +246,12 @@ function jobProfileValidate_(profile) {
 
   var excl = profile.exclusionTerms;
   if (!excl || typeof excl !== 'object') fail('exclusionTerms must be an object');
-  if (!excl.sales || typeof excl.sales !== 'object' ||
-      !isStringArray(excl.sales.titleTerms) || !isStringArray(excl.sales.dutyPhrases)) {
-    fail('exclusionTerms.sales must have titleTerms and dutyPhrases string arrays');
-  }
+  if (!excl.sales || typeof excl.sales !== 'object') fail('exclusionTerms.sales must be an object');
+  validateStringArray('exclusionTerms.sales.titleTerms', excl.sales.titleTerms, { required: true, lowercase: true });
+  validateStringArray('exclusionTerms.sales.dutyPhrases', excl.sales.dutyPhrases, { required: true, lowercase: true });
   ['generalManager', 'kitchenManager', 'heavyTravel', 'relocation', 'drivingDuty', 'seniorLeadership'].forEach(
     function (key) {
-      if (!isStringArray(excl[key])) {
-        fail('exclusionTerms.' + key + ' must be a string array');
-      }
+      validateStringArray('exclusionTerms.' + key, excl[key], { required: true, lowercase: true });
     }
   );
   if (excl.seniorLeadership.some(function (term) { return term.trim().toLowerCase() === 'manager'; })) {
@@ -243,33 +264,37 @@ function jobProfileValidate_(profile) {
   if (profile.experienceCeilingYears !== null && !isFiniteNumber(profile.experienceCeilingYears)) {
     fail('experienceCeilingYears must be null or a finite number');
   }
-  if (!isStringArray(profile.requiredSkills)) fail('requiredSkills must be a string array');
-  if (!isStringArray(profile.optionalSkills)) fail('optionalSkills must be a string array');
+  validateStringArray('requiredSkills', profile.requiredSkills, { lowercase: true, maxItems: 50 });
+  validateStringArray('optionalSkills', profile.optionalSkills, { lowercase: true, maxItems: 50 });
 
   if (!Array.isArray(profile.sourceQueryTerms) || profile.sourceQueryTerms.length === 0) {
     fail('sourceQueryTerms must be a non-empty array');
   }
+  if (profile.sourceQueryTerms.length > 50) fail('sourceQueryTerms may contain at most 50 entries');
+  const queryIds = {};
   profile.sourceQueryTerms.forEach(function (entry, i) {
     if (!entry || typeof entry !== 'object' ||
-        !isNonEmptyString(entry.id) ||
+        !isBoundedString(entry.id, 80) ||
         (entry.priority !== 1 && entry.priority !== 2 && entry.priority !== 3) ||
         typeof entry.remote !== 'boolean' ||
-        !isNonEmptyString(entry.query)) {
+        !isBoundedString(entry.query, 200)) {
       fail('sourceQueryTerms[' + i + '] must be {id, priority, remote, query}');
     }
+    if (!/^[a-z0-9-]+$/.test(entry.id)) fail('sourceQueryTerms[' + i + '].id is invalid');
+    if (queryIds[entry.id]) fail('sourceQueryTerms contains duplicate id: ' + entry.id);
+    queryIds[entry.id] = true;
   });
 
-  ['pagesPerScheduledRun', 'pagesPerManualRun', 'retryLimit',
-    'terminalErrorDisableThreshold', 'runtimeBudgetMs'].forEach(function (key) {
-    if (!isFiniteNumber(profile[key]) || profile[key] < 0) {
-      fail(key + ' must be a non-negative number');
-    }
-  });
+  requireInteger('pagesPerScheduledRun', profile.pagesPerScheduledRun, 1, 10);
+  requireInteger('pagesPerManualRun', profile.pagesPerManualRun, 1, 10);
+  requireInteger('retryLimit', profile.retryLimit, 0, 5);
+  requireInteger('terminalErrorDisableThreshold', profile.terminalErrorDisableThreshold, 1, 10);
+  requireInteger('runtimeBudgetMs', profile.runtimeBudgetMs, 1000, 330000);
 
   var schedule = profile.schedule;
   if (!schedule || typeof schedule !== 'object' ||
-      !isFiniteNumber(schedule.hour) || schedule.hour < 0 || schedule.hour > 23 ||
-      !isNonEmptyString(schedule.timeZone)) {
+      !Number.isInteger(schedule.hour) || schedule.hour < 0 || schedule.hour > 23 ||
+      !isBoundedString(schedule.timeZone, 100)) {
     fail('schedule must define hour (0-23) and a non-empty timeZone string');
   }
 
@@ -277,8 +302,14 @@ function jobProfileValidate_(profile) {
   if (!adapters || typeof adapters !== 'object' ||
       !adapters.jsearch || typeof adapters.jsearch !== 'object' ||
       typeof adapters.jsearch.enabled !== 'boolean' ||
-      !isStringArray(adapters.jsearch.publishers)) {
+      !Array.isArray(adapters.jsearch.publishers)) {
     fail('adapters.jsearch must define a boolean enabled and a string array publishers');
+  }
+  validateStringArray('adapters.jsearch.publishers', adapters.jsearch.publishers, {
+    required: true, lowercase: true, maxItems: 5, maxLength: 40
+  });
+  if (adapters.jsearch.publishers.length !== 1 || adapters.jsearch.publishers[0] !== 'linkedin') {
+    fail('Phase 4 permits only the linkedin publisher');
   }
 
   return true;
