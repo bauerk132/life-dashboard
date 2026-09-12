@@ -28,6 +28,26 @@ const SCHEMA = Object.freeze({
   Applications: Object.freeze([
     'id', 'job_id', 'status', 'applied_at', 'follow_up_at', 'contact_name', 'contact_email',
     'interview_at', 'outcome', 'notes', 'created_at', 'updated_at'
+  ]),
+  // Phase 4B. One row per discovery run (manual or scheduled), keyed on
+  // run_id (there is no 'id' column, so primaryKeyField_ falls back to the
+  // first field — see that function's comment). Supports checkpoint/resume:
+  // an interrupted run is found again by (date_key, mode) and resumed from
+  // checkpoint_json rather than restarted.
+  DiscoveryRuns: Object.freeze([
+    'run_id', 'source', 'provider', 'mode', 'date_key', 'started_at', 'finished_at',
+    'status', 'error_code', 'checkpoint_json', 'pages_attempted', 'raw_count',
+    'accepted_count', 'filtered_count', 'duplicate_count', 'updated_count',
+    'quarantined_count', 'error_count', 'profile_version', 'config_version',
+    'adapter_version', 'filter_version', 'identity_version'
+  ]),
+  // Phase 4B. Append-only, one row per candidate decision within a run.
+  // No raw payloads, no URLs with embedded secrets, no full descriptions —
+  // just enough to audit why a candidate was filtered/accepted/duplicated/
+  // updated/errored, and which job_id it produced (if any).
+  DiscoveryLog: Object.freeze([
+    'id', 'run_id', 'logged_at', 'source', 'external_id', 'url_hash', 'content_hash',
+    'decision', 'reason_code', 'secondary_reasons', 'profile_version', 'job_id'
   ])
 });
 
@@ -61,8 +81,35 @@ const PLAIN_TEXT_FIELDS_ = Object.freeze({
   ]),
   JobHistory: Object.freeze(['id', 'job_id', 'action', 'from_status', 'to_status', 'note']),
   Settings: Object.freeze(['key', 'value']),
-  Applications: Object.freeze(['id', 'contact_name', 'contact_email', 'outcome', 'notes'])
+  Applications: Object.freeze(['id', 'contact_name', 'contact_email', 'outcome', 'notes']),
+  // config_version, pages_attempted and the *_count columns are deliberately
+  // EXCLUDED here: they are real numbers (config_version mirrors
+  // JOB_PROFILE_.configVersion; the rest are run counters), and Phase 2/3's
+  // numeric-column precedent (see the note above on Jobs' match-score
+  // columns) applies just as much to Phase 4B's own counters.
+  DiscoveryRuns: Object.freeze([
+    'run_id', 'source', 'provider', 'mode', 'date_key', 'status', 'error_code',
+    'checkpoint_json', 'profile_version', 'adapter_version', 'filter_version',
+    'identity_version'
+  ]),
+  DiscoveryLog: Object.freeze([
+    'id', 'run_id', 'source', 'external_id', 'url_hash', 'content_hash', 'decision',
+    'reason_code', 'secondary_reasons', 'profile_version', 'job_id'
+  ])
 });
+
+// Formula-injection defense for Phase 4B discovery writes. A source-derived
+// string (job title, company, description snippet, error text) could
+// otherwise be interpreted by Sheets as a formula if it starts with one of
+// these characters when a cell isn't already covered by PLAIN_TEXT_FIELDS_'s
+// '@' number format (e.g. a column added or written to before
+// initializeDatabase has run, or defense-in-depth alongside it).
+const SHEET_FORMULA_TRIGGER_CHARS_ = Object.freeze(['=', '+', '-', '@', '\t', '\r']);
+
+// Generous bound, independent of any upstream field-length limit (e.g. the
+// 4A adapter's own title/description caps) — this is Database.gs's own
+// defense-in-depth limit on what it will ever write into one cell.
+const ESCAPE_SHEET_FORMULA_MAX_LENGTH_ = 2000;
 
 const SCRIPT_PROP_SHEET_ID_ = 'DATABASE_SHEET_ID';
 
@@ -132,6 +179,30 @@ function getTimeZone_() {
 
 function generateUUID_() {
   return Utilities.getUuid();
+}
+
+/**
+ * Trims, bounds the length of, and formula-escapes a source-derived value
+ * before it is written to any Sheet cell. Prefixes a literal `'` when the
+ * (trimmed) value would otherwise be parsed by Sheets as a formula (starts
+ * with =, +, -, @, a tab, or a CR). New, generic Phase 4B code — Phase 5's
+ * sanitizePlainText_ is a separate, unrelated helper and is deliberately
+ * not reused here, to avoid a cross-phase dependency.
+ *
+ * null/undefined become '' (never "null"/"undefined" strings). Every other
+ * value is coerced with String(value) first, so a number or boolean is
+ * safe to pass through unchanged.
+ */
+function escapeSheetFormula_(value) {
+  if (value === null || value === undefined) return '';
+  let str = String(value).trim();
+  if (str.length > ESCAPE_SHEET_FORMULA_MAX_LENGTH_) {
+    str = str.slice(0, ESCAPE_SHEET_FORMULA_MAX_LENGTH_) + '…(truncated)';
+  }
+  if (str.length > 0 && SHEET_FORMULA_TRIGGER_CHARS_.indexOf(str[0]) !== -1) {
+    str = "'" + str;
+  }
+  return str;
 }
 
 /**
@@ -439,36 +510,56 @@ function appendRecord_(sheetName, record) {
  * calling this function again from inside their own lock.
  */
 function updateRecordByIdInDb_(ss, sheetName, id, updates, precondition) {
+  if (id === null || id === undefined || id === '') {
+    throw UserError_('An id is required.', 'INVALID_ID');
+  }
+  return updateRecordByKeyInDb_(ss, sheetName, 'id', id, updates, precondition);
+}
+
+/**
+ * Generalizes updateRecordByIdInDb_ to update-by-any-key, for sheets like
+ * DiscoveryRuns that have no 'id' column and are looked up by their own
+ * natural key (run_id) instead — see primaryKeyField_. Same semantics as
+ * updateRecordByIdInDb_ (which is now a thin wrapper over this with
+ * keyField fixed to 'id', so every existing caller's behavior, including
+ * exact error codes, is unchanged): exactly one non-blank match is
+ * required (zero -> NOT_FOUND, two or more -> INTEGRITY_ERROR, nothing
+ * written either way); keyField and created_at (when present) are
+ * immutable; only known fields may appear in `updates`; updated_at (when
+ * the sheet has that column) is auto-set; `precondition`, if given, runs
+ * against the current row before anything is written, under the same
+ * lock this call is made within (see updateRecordByIdInDb_'s doc comment
+ * for why this exists instead of a nested withLock_ call).
+ */
+function updateRecordByKeyInDb_(ss, sheetName, keyField, keyValue, updates, precondition) {
     assertSheetName_(sheetName);
-    if (id === null || id === undefined || id === '') {
-      throw UserError_('An id is required.', 'INVALID_ID');
+    if (keyValue === null || keyValue === undefined || keyValue === '') {
+      throw UserError_('A ' + keyField + ' is required.', 'INVALID_ID');
     }
     if (updates === null || typeof updates !== 'object' || Array.isArray(updates)) {
       throw UserError_('Invalid update payload.', 'INVALID_RECORD');
     }
 
     const fields = SCHEMA[sheetName];
+    const keyIndex = fields.indexOf(keyField);
+    if (keyIndex === -1) {
+      // Distinct from UNKNOWN_SHEET: sheetName is a real, known sheet
+      // (assertSheetName_ above already confirmed that) — it just has no
+      // such column to update by.
+      throw UserError_('This data set has no ' + keyField + ' column.', 'NO_ID_COLUMN');
+    }
     const unknown = Object.keys(updates).filter(function (k) { return fields.indexOf(k) === -1; });
     if (unknown.length > 0) {
       throw UserError_('Unknown field(s): ' + unknown.join(', '), 'UNKNOWN_FIELD');
     }
-    if (Object.prototype.hasOwnProperty.call(updates, 'id')) {
-      throw UserError_('id cannot be changed.', 'IMMUTABLE_FIELD');
+    if (Object.prototype.hasOwnProperty.call(updates, keyField)) {
+      throw UserError_(keyField + ' cannot be changed.', 'IMMUTABLE_FIELD');
     }
     if (Object.prototype.hasOwnProperty.call(updates, 'created_at')) {
       throw UserError_('created_at cannot be changed.', 'IMMUTABLE_FIELD');
     }
 
     const sheet = getVerifiedSheet_(ss, sheetName);
-    const idIndex = fields.indexOf('id');
-    if (idIndex === -1) {
-      // Distinct from UNKNOWN_SHEET: sheetName is a real, known sheet
-      // (assertSheetName_ above already confirmed that) — it just has no
-      // 'id' column to update by (e.g. Settings, keyed on 'key' instead).
-      // Reusing UNKNOWN_SHEET here would tell a caller "no such data set"
-      // about a data set that very much exists.
-      throw UserError_('This data set has no id column and cannot be updated by id.', 'NO_ID_COLUMN');
-    }
 
     const lastRow = sheet.getLastRow();
     if (lastRow < 2) {
@@ -483,14 +574,14 @@ function updateRecordByIdInDb_(ss, sheetName, id, updates, precondition) {
       const row = data[i];
       const isBlank = row.every(function (v) { return v === '' || v === null || v === undefined; });
       if (isBlank) continue;
-      if (row[idIndex] === id) matches.push(i);
+      if (row[keyIndex] === keyValue) matches.push(i);
     }
 
     if (matches.length === 0) {
       throw UserError_('Record not found.', 'NOT_FOUND');
     }
     if (matches.length > 1) {
-      throw UserError_('Multiple records share this id. No change was made.', 'INTEGRITY_ERROR');
+      throw UserError_('Multiple records share this ' + keyField + '. No change was made.', 'INTEGRITY_ERROR');
     }
 
     const rowOffset = matches[0];          // 0-based index into `data`
@@ -519,7 +610,7 @@ function updateRecordByIdInDb_(ss, sheetName, id, updates, precondition) {
     });
 
     sheet.getRange(sheetRow, 1, 1, fields.length).setValues([rowValues]);
-    return readRows_(ss, sheetName).filter(function (r) { return r.id === id; })[0];
+    return readRows_(ss, sheetName).filter(function (r) { return r[keyField] === keyValue; })[0];
 }
 
 /**

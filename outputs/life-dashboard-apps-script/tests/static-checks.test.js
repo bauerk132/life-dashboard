@@ -45,13 +45,33 @@ const PUBLIC_ALLOWLIST = [
   'doGet', 'include', 'getAppStatus', 'initializeDatabase',
   'getDashboardData', 'createTask', 'completeTask', 'reopenTask', 'archiveTask',
   'getUpcomingEvents', 'getJobsQueue', 'setJobStatus', 'addJobNote', 'getJobHistory',
-  'runDiscovery'
+  'runDiscovery',
+  // Phase 4B (Discovery.gs), editor-run administrative actions. Apps
+  // Script has no "editor-only" visibility level (see the note above on
+  // initializeDatabase), so each is listed honestly rather than pretending
+  // it is private. Deployment stays access:MYSELF, so only the owner can
+  // reach these regardless.
+  'installDiscoveryTrigger',   // idempotent: creates the one daily 7am trigger
+  'removeDiscoveryTrigger',    // deletes any installed discovery trigger(s)
+  'resetDiscoverySource',      // clears a disabled source's terminal-error state
+  // Deliberately NOT underscore-suffixed: Google's own docs do not
+  // guarantee a trigger can invoke a trailing-underscore handler, so this
+  // name works either way. It is still safe to expose because it refuses
+  // to run any source/filter/dedupe/persistence logic unless its own
+  // trigger-identity guard (checked inside the function) passes.
+  'runScheduledDiscovery'
 ];
 
 const BANNED_PATTERNS = [
   { pattern: /ALLOWALL/, label: 'ALLOWALL (must not set permissive frame protection)' },
   { pattern: /USER_ACCESSING/, label: 'USER_ACCESSING (manifest must use USER_DEPLOYING)' },
-  { pattern: /script\.scriptapp/, label: 'script.scriptapp scope (not needed by Phase 1)' },
+  // Phase 4B needs this scope, but only in the manifest — no .gs/.html file
+  // should ever reference the scope string itself.
+  { pattern: /script\.scriptapp/, label: 'script.scriptapp scope (manifest-only; added in Phase 4B for the daily discovery trigger)', allowedIn: ['appsscript.json'] },
+  // ScriptApp (trigger install/remove/lookup) is confined to Discovery.gs.
+  // No other deployed file — including the Jobs.gs queue paths, Tasks.gs,
+  // Calendar.gs, Code.gs, or any HTML — may reference it.
+  { pattern: /\bScriptApp\b/, label: 'ScriptApp (trigger management confined to Discovery.gs)', allowedIn: ['Discovery.gs'] },
   { pattern: /seedDemoData/, label: 'seedDemoData (no fabricated/demo data in the shipped app)' },
   { pattern: /example\.com/, label: 'example.com (no fabricated production data)' },
   // Wholesale bans rather than vendor-name string matching: this project
@@ -183,7 +203,8 @@ describe('static checks: appsscript.json', () => {
     assert.deepEqual(manifest.oauthScopes, [
       'https://www.googleapis.com/auth/spreadsheets',
       'https://www.googleapis.com/auth/calendar.readonly',
-      'https://www.googleapis.com/auth/script.external_request'
+      'https://www.googleapis.com/auth/script.external_request',
+      'https://www.googleapis.com/auth/script.scriptapp'
     ]);
     assert.equal(manifest.runtimeVersion, 'V8');
   });
@@ -346,11 +367,30 @@ describe('static checks: Phase 4A network boundary', () => {
     });
   });
 
-  it('S5: allowedIn is used by exactly the two network entries and names only JobSource_JSearch.gs', () => {
+  it('S5: allowedIn is used by exactly these 4 entries, each naming exactly its documented file', () => {
+    // Rewritten for Phase 4B: this used to assert all allowedIn entries
+    // name only JobSource_JSearch.gs. That is no longer true (the trigger
+    // scope/API are confined to their own files instead), so this now
+    // pins the exact map by label rather than a single shared file name —
+    // stricter than before, not looser.
+    const expectedAllowedIn = {
+      'UrlFetchApp (outbound calls only in the authorized JSearch adapter)': ['JobSource_JSearch.gs'],
+      'fetch( (outbound calls only in the authorized JSearch adapter)': ['JobSource_JSearch.gs'],
+      'script.scriptapp scope (manifest-only; added in Phase 4B for the daily discovery trigger)': ['appsscript.json'],
+      'ScriptApp (trigger management confined to Discovery.gs)': ['Discovery.gs']
+    };
     const entriesWithAllowedIn = BANNED_PATTERNS.filter((p) => p.allowedIn !== undefined);
-    assert.equal(entriesWithAllowedIn.length, 2, 'expected exactly 2 BANNED_PATTERNS entries with allowedIn');
+    assert.equal(
+      entriesWithAllowedIn.length,
+      Object.keys(expectedAllowedIn).length,
+      `expected exactly ${Object.keys(expectedAllowedIn).length} BANNED_PATTERNS entries with allowedIn, found ${entriesWithAllowedIn.length}`
+    );
     entriesWithAllowedIn.forEach((entry) => {
-      assert.deepEqual(entry.allowedIn, ['JobSource_JSearch.gs']);
+      assert.ok(
+        Object.prototype.hasOwnProperty.call(expectedAllowedIn, entry.label),
+        `unexpected allowedIn entry not pinned by this test: ${entry.label}`
+      );
+      assert.deepEqual(entry.allowedIn, expectedAllowedIn[entry.label]);
     });
   });
 

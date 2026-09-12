@@ -262,6 +262,96 @@ function createSession_(timeZone) {
 }
 
 /**
+ * Fake ScriptApp, for Discovery.gs's trigger install/remove/guard code.
+ * Mirrors the real builder-chain shape closely enough for that code to run
+ * unmodified against it:
+ *   ScriptApp.newTrigger(fn).timeBased().everyDays(1).atHour(7)
+ *     .inTimezone('America/New_York').create()
+ * `getProjectTriggers()`/`deleteTrigger()` operate on one project-wide list
+ * shared by every trigger created through this same ScriptApp instance
+ * (matching real Apps Script, where triggers are project-scoped, not
+ * handler-scoped). `getUniqueId()` returns a String, matching the real
+ * Trigger class (confirmed against
+ * https://developers.google.com/apps-script/reference/script/trigger).
+ */
+function createScriptApp_() {
+  const triggers = [];
+  let nextId = 1;
+
+  function makeTrigger(handlerFunction, config) {
+    const uniqueId = 'fake-trigger-' + (nextId++);
+    return {
+      uniqueId: uniqueId,
+      getUniqueId: function () { return uniqueId; },
+      getHandlerFunction: function () { return handlerFunction; },
+      getTriggerSource: function () { return 'CLOCK'; },
+      getEventType: function () { return 'CLOCK'; },
+      _config: config
+    };
+  }
+
+  function createClockTriggerBuilder_(handlerFunction) {
+    const config = { everyDays: null, atHour: null, nearMinute: null, timezone: null };
+    const builder = {
+      everyDays: function (n) { config.everyDays = n; return builder; },
+      atHour: function (h) { config.atHour = h; return builder; },
+      nearMinute: function (m) { config.nearMinute = m; return builder; },
+      inTimezone: function (tz) { config.timezone = tz; return builder; },
+      create: function () {
+        const trigger = makeTrigger(handlerFunction, config);
+        triggers.push(trigger);
+        return trigger;
+      }
+    };
+    return builder;
+  }
+
+  return {
+    newTrigger: function (handlerFunction) {
+      return {
+        timeBased: function () { return createClockTriggerBuilder_(handlerFunction); }
+      };
+    },
+    getProjectTriggers: function () { return triggers.slice(); },
+    deleteTrigger: function (trigger) {
+      const idx = triggers.findIndex(function (t) {
+        return t.getUniqueId() === (trigger && trigger.getUniqueId());
+      });
+      if (idx !== -1) triggers.splice(idx, 1);
+    },
+    getScriptId: function () { return 'fake-script-id'; },
+    EventType: { CLOCK: 'CLOCK' },
+    TriggerSource: { CLOCK: 'CLOCK' }
+  };
+}
+
+/**
+ * Injectable fake clock for testing time-based logic (Discovery.gs's
+ * runtime-budget guard, checkpoint timestamps) without real sleeps.
+ * `initialNow` is a Date-constructor-compatible value (ISO string, ms
+ * number, or omitted for real wall-clock "now" at creation time).
+ * `advance(ms)` and `setNow(value)` mutate the clock; every read
+ * (`Date.now()` and no-arg `new Date()` inside the sandbox, once installed
+ * via loadAppsScriptContext_'s `fakeClock` option) reflects the latest
+ * value. Dated `new Date(x)` calls with explicit arguments are NOT
+ * intercepted — only the no-arg constructor and `Date.now()` are, since
+ * those are the only two forms that read "the current time" rather than
+ * construct a specific one.
+ */
+function createFakeClock_(initialNow) {
+  let nowMs = (initialNow === undefined || initialNow === null)
+    ? Date.now()
+    : (typeof initialNow === 'number' ? initialNow : new Date(initialNow).getTime());
+  return {
+    now: function () { return nowMs; },
+    advance: function (ms) { nowMs += ms; },
+    setNow: function (value) {
+      nowMs = (typeof value === 'number') ? value : new Date(value).getTime();
+    }
+  };
+}
+
+/**
  * Fake CalendarApp. `options.events` is an array of plain descriptors
  * `{title, start: Date, end: Date, allDay: boolean}`; getEvents(start,
  * end) returns the ones that overlap the requested window, wrapped as
@@ -402,6 +492,15 @@ function createConsoleFake_() {
  *   spreadsheetName    - fake spreadsheet display name
  *   initialSheets      - { SheetName: { header: [...], rows: [[...], ...] } }
  *   lockOptions        - passed through to createLockService_
+ *   fakeClock          - omit for the real vm-realm Date/Date.now(). Pass
+ *                        `true` (starts at real wall-clock "now") or an
+ *                        ISO-string/ms-number/{initialNow} to install a
+ *                        controllable clock: the sandbox's no-arg
+ *                        `new Date()` and `Date.now()` are rebound to it
+ *                        (explicit-argument `new Date(x)` is untouched).
+ *                        The returned context's `.clock` exposes
+ *                        `advance(ms)`/`setNow(value)` to drive it from the
+ *                        test. See createFakeClock_ above.
  */
 function loadAppsScriptContext_(options) {
   options = options || {};
@@ -437,6 +536,17 @@ function loadAppsScriptContext_(options) {
   }
 
   const urlFetch = createUrlFetchApp_(options.urlFetch || { responses: [] });
+  const scriptApp = createScriptApp_();
+
+  let fakeClock = null;
+  if (options.fakeClock) {
+    const initialNow = (options.fakeClock === true)
+      ? undefined
+      : (Object.prototype.hasOwnProperty.call(options.fakeClock, 'initialNow')
+        ? options.fakeClock.initialNow
+        : options.fakeClock);
+    fakeClock = createFakeClock_(initialNow);
+  }
 
   const sandbox = {
     console: consoleFake,
@@ -454,8 +564,15 @@ function loadAppsScriptContext_(options) {
     UrlFetchApp: urlFetch,
     Session: createSession_(timeZone),
     HtmlService: createHtmlService_(readHtmlFile),
-    CalendarApp: createCalendarApp_(options.calendarOptions)
+    CalendarApp: createCalendarApp_(options.calendarOptions),
+    ScriptApp: scriptApp
   };
+
+  if (fakeClock) {
+    // Bridge fn: lets the prelude (running INSIDE the vm context, which has
+    // its own realm-isolated globalThis) read the host-side clock's value.
+    sandbox.__FAKE_CLOCK_NOW__ = function () { return fakeClock.now(); };
+  }
 
   vm.createContext(sandbox);
 
@@ -483,7 +600,35 @@ function loadAppsScriptContext_(options) {
     '};'
   ].join('\n');
 
-  const combinedSource = files.map(function (f) {
+  // Installed BEFORE the project files so any top-level code in them (there
+  // shouldn't be any that reads the clock, but function bodies defined
+  // there close over whatever `Date` resolves to at CALL time regardless of
+  // load order) sees the override. Only the no-arg constructor and
+  // `Date.now()` are redirected to the fake clock; `new RealDate(...args)`
+  // is used for every other form, so e.g. `new Date('2026-01-01')` and
+  // `new Date(y, m, d)` behave exactly as the real Date would. Returning an
+  // object from a function invoked with `new` makes `new FakeDate()`
+  // evaluate to that object (a genuine RealDate instance) instead of the
+  // implicit `this` — so `instanceof Date`/`Object.prototype.toString`
+  // checks on the result see a real Date, not a wrapper.
+  const fakeClockPrelude = fakeClock ? [
+    '// ---- fake clock (test harness only, not part of the real Apps Script project) ----',
+    '(function () {',
+    '  var RealDate = Date;',
+    '  function FakeDate(...args) {',
+    '    if (args.length === 0) return new RealDate(globalThis.__FAKE_CLOCK_NOW__());',
+    '    return new RealDate(...args);',
+    '  }',
+    '  FakeDate.prototype = RealDate.prototype;',
+    '  FakeDate.now = function () { return globalThis.__FAKE_CLOCK_NOW__(); };',
+    '  FakeDate.parse = RealDate.parse;',
+    '  FakeDate.UTC = RealDate.UTC;',
+    '  globalThis.Date = FakeDate;',
+    '})();',
+    ''
+  ].join('\n') : '';
+
+  const combinedSource = fakeClockPrelude + files.map(function (f) {
     return '// ---- ' + f + ' ----\n' + fs.readFileSync(path.join(PROJECT_ROOT, f), 'utf8');
   }).join('\n\n') + '\n\n' + testExportsTrailer;
 
@@ -504,7 +649,9 @@ function loadAppsScriptContext_(options) {
     sheetsByName: sheetsByName,
     consoleFake: consoleFake,
     testExports: testExports,
-    urlFetch: urlFetch
+    urlFetch: urlFetch,
+    scriptApp: scriptApp,
+    clock: fakeClock // null unless options.fakeClock was passed
   };
 }
 
@@ -514,5 +661,7 @@ module.exports = {
   createSheet_: createSheet_,
   hostify_: hostify_,
   createCalendarApp_: createCalendarApp_,
-  createUrlFetchApp_: createUrlFetchApp_
+  createUrlFetchApp_: createUrlFetchApp_,
+  createScriptApp_: createScriptApp_,
+  createFakeClock_: createFakeClock_
 };

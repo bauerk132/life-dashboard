@@ -250,6 +250,57 @@ function getJobsQueue() {
   }
 }
 
+/**
+ * Phase 4B. Inserts one newly discovered Jobs row. Thin, narrow wrapper
+ * around appendRecordInDb_, used only by Discovery.gs. Does not acquire its
+ * own lock — Discovery.gs's whole run holds one lock for its entire
+ * duration (see Discovery.gs), and LockService's reentrancy behavior for a
+ * script re-acquiring its own held lock within one execution is not
+ * something this project can verify without a live deployment (see
+ * updateRecordByIdInDb_'s own doc comment on the same point), so this
+ * function must never wrap its own withLock_.
+ *
+ * `record` must already be a complete Jobs row (status:'New',
+ * record_version:1, discovered_at = last_seen_at = the run's nowIso) — that
+ * shaping is JobDedupe.gs's INSERT action's responsibility, not this
+ * function's. This function only confirms schema membership (via
+ * appendRecordInDb_) and writes exactly what it is given.
+ */
+function insertDiscoveredJob_(ss, record) {
+  return appendRecordInDb_(ss, 'Jobs', record);
+}
+
+/**
+ * Phase 4B. Updates ONLY last_seen_at on an existing Jobs row, identified
+ * by id. Used only by Discovery.gs's TOUCH action, under the caller's
+ * already-held lock (see insertDiscoveredJob_'s comment on why this
+ * function never acquires its own). Never changes status, saved_at, notes,
+ * or record_version — those are user-owned fields a discovery run must not
+ * touch (contract §4).
+ *
+ * The precondition is an explicit, testable row-exists guard: it throws
+ * NOT_FOUND if the row being touched cannot be read back as itself. In
+ * practice updateRecordByIdInDb_ already throws NOT_FOUND before this
+ * callback ever runs if no row matches `jobId`, so this mostly documents
+ * the invariant rather than catching a new failure mode today — it is the
+ * extension point for a future touch-time check (e.g. refusing to touch a
+ * row whose identity fields no longer match what the dedupe index expected)
+ * without changing this function's signature.
+ */
+function touchJobLastSeen_(ss, jobId, lastSeenAtIso) {
+  if (!isNonBlankString_(jobId)) {
+    throw UserError_('A job id is required.', 'INVALID_ID');
+  }
+  if (!isNonBlankString_(lastSeenAtIso)) {
+    throw UserError_('A last_seen_at timestamp is required.', 'INVALID_FIELD');
+  }
+  return updateRecordByIdInDb_(ss, 'Jobs', jobId, { last_seen_at: lastSeenAtIso }, function (fresh) {
+    if (!fresh || !isNonBlankString_(fresh.id)) {
+      throw UserError_('Job not found.', 'NOT_FOUND');
+    }
+  });
+}
+
 function buildHistoryRecord_(jobId, action, fromStatus, toStatus, note) {
   return {
     job_id: jobId,
