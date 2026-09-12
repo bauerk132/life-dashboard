@@ -759,8 +759,10 @@ The current fakes have **no** `UrlFetchApp`, and `createUtilities_()` provides o
    - It exposes `calls` so tests can assert the call count and exact URL and params.
 2. **Wiring in `loadAppsScriptContext_`:**
    - `sandbox.UrlFetchApp = createUrlFetchApp_(options.urlFetch || { responses: [] })`.
+   - This assignment is **unconditional**: it runs on every call, whether or not `options.urlFetch` was passed. Do **not** wrap it in `if (options.urlFetch)`. A conditional fake would leave `UrlFetchApp` undefined in Phase 1–3 tests, and a `ReferenceError` swallowed by a try/catch would hide a real network call. That would silently remove the zero-network guarantee that S4 and §15 rely on.
    - With no `urlFetch` option, **any** fetch throws. Every existing Phase 1–3 test then implicitly proves those code paths make zero network calls.
    - Return `urlFetch` (the fake) from `loadAppsScriptContext_` alongside the existing fields.
+   - `sandbox.UrlFetchApp` is the **one** new always-present global. It is the single permitted exception to "additive only" below. Existing tests never reference it, so it breaks nothing, and step 6 (re-running the Phase 1–3 suites unchanged) is the proof.
 3. **`Utilities.computeDigest`, `Utilities.DigestAlgorithm.SHA_256` and `Utilities.Charset.UTF_8`**, using Node `crypto`. Return a signed-byte **Array** (values −128..127) to match Apps Script. Build the array in the vm realm or hostify it consistently with the existing `hostify_` pattern.
 4. **`Utilities.formatDate` with pattern `yyyy-MM`** (period key), plus ISO support if needed, using `Intl.DateTimeFormat` with the given `tz`. Existing behavior for `yyyy-MM-dd` must be unchanged.
 
@@ -786,7 +788,7 @@ Headers are defined in the test file, not in fixtures.
 
 Fixture safety test (T34): scan every fixture for things that look like an email address, a US phone number, a street address (`\d+ \w+ (St|Ave|Rd|Blvd)`), or the fake key string, and assert none appear.
 
-`.claspignore` is a whitelist, so `tests/` is already excluded from deployment. A static test asserts that `.claspignore` still un-ignores exactly the expected deployable files.
+`.claspignore` is a whitelist, so `tests/` is already excluded from deployment. Static test S7 (§14.4) asserts that `.claspignore` still un-ignores exactly the expected deployable files.
 
 ---
 
@@ -906,14 +908,14 @@ This automatically subjects the adapter to:
 
 ### 14.2 Narrow, don't delete, the network bans
 
-Today (`tests/static-checks.test.js:61-62`):
+Today, inside the `BANNED_PATTERNS` array in `tests/static-checks.test.js` (locate by text, not line number, because §14.1 edits lines above it):
 
 ```javascript
 { pattern: /UrlFetchApp/, label: 'UrlFetchApp (no outbound network calls of any kind)' },
 { pattern: /fetch\(/,     label: 'fetch( (no outbound network calls of any kind)' },
 ```
 
-`UrlFetchApp.fetch(` matches **both** patterns, so both need the same single-file exception. Change the two entries to carry an explicit per-file allowance, and change **only** the loop at lines 241–250 to honor it:
+`UrlFetchApp.fetch(` matches **both** patterns, so both need the same single-file exception. Change the two entries to carry an explicit per-file allowance. Then change **only** the inner loop to honor it. That loop is inside `describe('static checks: banned patterns absent from deployed files', …)` → `ALL_DEPLOYED_FILES.forEach((filename) => {`, and today it reads `BANNED_PATTERNS.forEach(({ pattern, label }) => {`:
 
 ```javascript
 { pattern: /UrlFetchApp/, label: 'UrlFetchApp (outbound calls only in the authorized JSearch adapter)', allowedIn: ['JobSource_JSearch.gs'] },
@@ -950,13 +952,15 @@ Add a new `describe('static checks: Phase 4A network boundary', …)` with:
 ]
 ```
 
-Update the `deepEqual` at `tests/static-checks.test.js:179-182` in the **same change**. Do not touch `webapp`, `runtimeVersion`, `timeZone`, or any other manifest key. Do not add `urlFetchWhitelist` in 4A; if §16 research finds it relevant to standalone web apps, record that in the hand-back for Claude to evaluate.
+Update the `assert.deepEqual(manifest.oauthScopes, [ … ])` assertion in `tests/static-checks.test.js` (locate by that text, not by line number) in the **same change**. Do not touch `webapp`, `runtimeVersion`, `timeZone`, or any other manifest key. Do not add `urlFetchWhitelist` in 4A; if §16 research finds it relevant to standalone web apps, record that in the hand-back for Claude to evaluate.
 
 Record in the hand-back that adding a scope means the user will see a **re-authorization prompt** the next time the project is authorized or deployed. That happens in 4B, not 4A.
 
 ### 14.4 `.claspignore`
 
-Add `!JobSource_JSearch.gs` after `!Jobs.gs`. Add a static test that the set of un-ignored entries equals exactly `appsscript.json`, the 6 `.gs` files and the 3 `.html` files.
+Add `!JobSource_JSearch.gs` after `!Jobs.gs`.
+
+**S7** (add it to the Phase 4A network-boundary `describe`): parse `.claspignore`, collect every line that starts with `!`, and assert that the set equals `ALL_DEPLOYED_FILES`. That is exactly 10 entries: `appsscript.json`, the 6 `.gs` files and the 3 `.html` files. The file un-ignores 9 today (verified 2026-09-12: `appsscript.json`, 5 `.gs`, 3 `.html`). If S7 fails, fix `.claspignore` or `DEPLOYED_GS_FILES`. **Never** loosen the assertion to make it pass.
 
 ---
 
@@ -1100,7 +1104,7 @@ Run the 4A test file after each group:
 run_command(command="node --test tests\phase4a-jsearch.test.js", cwd="<APP>")
 ```
 
-**Step 10: static and manifest.** Apply §14 with `edit_file`: `DEPLOYED_GS_FILES`, `allowedIn` plus the loop, S1–S6, manifest scope plus deepEqual, `.claspignore` plus its test.
+**Step 10: static and manifest.** Apply §14 with `edit_file`: `DEPLOYED_GS_FILES`, `allowedIn` plus the loop, S1–S6, manifest scope plus deepEqual, `.claspignore` plus S7.
 
 **Step 11: full suite.**
 
@@ -1174,14 +1178,14 @@ Files created or edited, all under `outputs/life-dashboard-apps-script/` unless 
 `PHASE_4A_HANDOFF_TO_CLAUDE.md` must contain:
 
 1. Status (Complete, Partial, or Blocked) and the statement "Phase 4 is not complete; 4B pending".
-2. Antigravity surface, version if visible, and model label used (e.g. Gemini 3.8 Flash).
+2. Antigravity surface, version if visible, and model label used (e.g. Gemini 3.8 Flash). Also report the status of each §4.3 Deny rule: seen applied in Settings, rejected by the UI, or not checked.
 3. Entry-gate evidence, item by item, including the user's authorization message quoted verbatim.
 4. Every file read, created, and edited, with a one-line purpose each.
 5. Baseline test command and totals, and the final command and totals, with any failures and fixes.
 6. Interface summary for 4B: the four items in §9.1, the result shape, the classification table as implemented, and every constant value.
 7. Quota design as implemented: state JSON example, roll-over rules, and caps with arithmetic.
 8. Normalization rules as implemented, including any deviations from §11 with reasons.
-9. Static-check diff summary: `allowedIn` entries, S1–S6, manifest scope, `.claspignore`.
+9. Static-check diff summary: `allowedIn` entries, S1–S7, manifest scope, `.claspignore`.
 10. Documentation verification table (§16): claim, URL, access date, confirmed or unconfirmed.
 11. **Script Property names required, with no values**: `JSEARCH_RAPIDAPI_KEY` (secret, set by the user in 4B) and `JSEARCH_QUOTA_STATE` (non-secret, adapter-managed).
 12. Live items: "Not run — authorization not provided".
