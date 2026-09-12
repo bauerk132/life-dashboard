@@ -1,0 +1,18 @@
+{
+  "status": "OK",
+  "request_id": "req-legacy-20260912-007",
+  "parameters": {
+    "query": "help desk technician in Pittsburgh, PA",
+    "num_pages": "1"
+  },
+  "data": [
+    {
+      "job_id": "9995000001-legacyShape",
+      "job_title": "Help Desk Specialist",
+      "employer_name": "Example Harbor Clinics",
+      "job_publisher": "LinkedIn",
+      "job_apply_link": "https://www.linkedin.com/jobs/view/9995000001",
+      "job_description": "Legacy format response body."
+    }
+  ]
+}

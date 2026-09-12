@@ -1,0 +1,21 @@
+{
+  "status": "OK",
+  "request_id": "req-opt-20260912-005",
+  "parameters": {
+    "query": "help desk technician in Pittsburgh, PA",
+    "num_pages": "1"
+  },
+  "data": {
+    "jobs": [
+      {
+        "job_id": "9994000001-optMissing",
+        "job_title": "IT Help Desk Technician",
+        "employer_name": "Example Harbor Clinics",
+        "job_publisher": "LinkedIn",
+        "job_apply_link": "https://www.linkedin.com/jobs/view/9994000001",
+        "job_description": "General IT support with missing optional fields."
+      }
+    ],
+    "cursor": ""
+  }
+}

@@ -16,6 +16,12 @@
 !Tasks.gs
 !Calendar.gs
 !Jobs.gs
+!JobSource_JSearch.gs
+!JobFilters.gs
+!JobDedupe.gs
+!Discovery.gs
+# Phase 5 M1: Staged for deployment alongside Milestone 2 static-checks allowlist updates:
+# !Applications.gs
 !Index.html
 !Styles.html
 !JavaScript.html

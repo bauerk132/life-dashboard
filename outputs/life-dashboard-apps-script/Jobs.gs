@@ -16,9 +16,9 @@ const JOB_TRANSITIONS_ = Object.freeze({
   'Reviewed': Object.freeze(['Saved', 'Rejected']),
   'Saved': Object.freeze(['Ready to Apply', 'Rejected']),
   'Ready to Apply': Object.freeze(['Applied', 'Rejected']),
-  'Applied': Object.freeze(['Interview']),
-  'Interview': Object.freeze(['Offer']),
-  'Offer': Object.freeze([]),
+  'Applied': Object.freeze(['Interview', 'Rejected']),
+  'Interview': Object.freeze(['Offer', 'Rejected']),
+  'Offer': Object.freeze(['Rejected']),
   // Recovery is intentionally narrow: a rejected record is returned to
   // Reviewed, which makes the next decision explicit rather than skipping
   // ahead in the state machine.

@@ -28,6 +28,22 @@ const SCHEMA = Object.freeze({
   Applications: Object.freeze([
     'id', 'job_id', 'status', 'applied_at', 'follow_up_at', 'contact_name', 'contact_email',
     'interview_at', 'outcome', 'notes', 'created_at', 'updated_at'
+  ]),
+  // Phase 5 additive operational schemas
+  JobScores: Object.freeze([
+    'id', 'job_id', 'job_description_hash', 'profile_version', 'prompt_version', 'schema_version',
+    'provider', 'model', 'status', 'skills_match', 'experience_match', 'education_match',
+    'location_match', 'salary_match', 'overall_match', 'recommendation', 'evidence_json',
+    'gaps_json', 'input_tokens', 'output_tokens', 'estimated_cost', 'currency',
+    'request_id_hash', 'created_at', 'validated_at', 'error_code'
+  ]),
+  AIUsage: Object.freeze([
+    'id', 'timestamp', 'request_id_hash', 'provider', 'model', 'operation',
+    'input_tokens', 'output_tokens', 'total_tokens', 'estimated_cost', 'currency',
+    'status', 'latency_ms', 'caller', 'session_id', 'error_code'
+  ]),
+  ApplicationHistory: Object.freeze([
+    'id', 'application_id', 'job_id', 'action', 'from_status', 'to_status', 'note', 'created_at'
   ])
 });
 
@@ -61,7 +77,19 @@ const PLAIN_TEXT_FIELDS_ = Object.freeze({
   ]),
   JobHistory: Object.freeze(['id', 'job_id', 'action', 'from_status', 'to_status', 'note']),
   Settings: Object.freeze(['key', 'value']),
-  Applications: Object.freeze(['id', 'contact_name', 'contact_email', 'outcome', 'notes'])
+  Applications: Object.freeze(['id', 'contact_name', 'contact_email', 'outcome', 'notes']),
+  JobScores: Object.freeze([
+    'id', 'job_id', 'job_description_hash', 'profile_version', 'prompt_version', 'schema_version',
+    'provider', 'model', 'status', 'recommendation', 'evidence_json', 'gaps_json',
+    'currency', 'request_id_hash', 'error_code'
+  ]),
+  AIUsage: Object.freeze([
+    'id', 'request_id_hash', 'provider', 'model', 'operation',
+    'currency', 'status', 'caller', 'session_id', 'error_code'
+  ]),
+  ApplicationHistory: Object.freeze([
+    'id', 'application_id', 'job_id', 'action', 'from_status', 'to_status', 'note'
+  ])
 });
 
 const SCRIPT_PROP_SHEET_ID_ = 'DATABASE_SHEET_ID';

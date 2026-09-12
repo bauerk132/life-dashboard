@@ -1,0 +1,12 @@
+{
+  "status": "OK",
+  "request_id": "req-empty-20260912-006",
+  "parameters": {
+    "query": "help desk technician in Pittsburgh, PA",
+    "num_pages": "1"
+  },
+  "data": {
+    "jobs": [],
+    "cursor": ""
+  }
+}
