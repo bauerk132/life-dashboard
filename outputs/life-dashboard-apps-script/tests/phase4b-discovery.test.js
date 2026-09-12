@@ -142,7 +142,7 @@ describe('Phase 4B: Discovery Execution and Persistence (Requirements 1 - 5)', (
     const runs = hostify_(ctx.sandbox.readRows_(ctx.spreadsheet, 'DiscoveryRuns'));
     assert.equal(runs.length, 1);
     assert.equal(runs[0].accepted_count, 1);
-    assert.equal(runs[0].status, 'PARTIAL'); // maxPages 1 of 13 queries
+    assert.equal(runs[0].status, 'PARTIAL'); // maxPages 1 of 5 daily queries
 
     const logs = hostify_(ctx.sandbox.readRows_(ctx.spreadsheet, 'DiscoveryLog'));
     assert.equal(logs.length, 1);
@@ -688,5 +688,147 @@ describe('Phase 4B: Source Terminal States, Errors, and Formatting (Requirements
     assert.equal(logsStr.includes(TEST_KEY), false);
     assert.equal(logsStr.includes('X-RapidAPI'), false);
     assert.equal(logsStr.includes('test-req-1'), false);
+  });
+});
+
+describe('Phase 4B: Claude Review Follow-up (Requirements 25 - 29)', () => {
+  it('25. NOT_CONFIGURED stops immediately with zero fetch calls, an unchanged checkpoint, and the source left enabled', () => {
+    const ctx = createDiscoveryContext({
+      scriptProperties: { JSEARCH_RAPIDAPI_KEY: '' }
+    });
+
+    const summary = hostify_(ctx.sandbox.runDiscovery({ maxPages: 1 }));
+    assert.equal(summary.ok, false);
+    assert.equal(summary.status, 'FAILED');
+    assert.equal(summary.errorCode, 'NOT_CONFIGURED');
+    assert.equal(ctx.urlFetch.calls.length, 0);
+
+    const runs = hostify_(ctx.sandbox.readRows_(ctx.spreadsheet, 'DiscoveryRuns'));
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].status, 'FAILED');
+    assert.equal(runs[0].error_code, 'NOT_CONFIGURED');
+    assert.equal(runs[0].pages_attempted, 0);
+    assert.equal(runs[0].error_count, 0);
+    const checkpoint = JSON.parse(runs[0].checkpoint_json);
+    assert.equal(checkpoint.queryIndex, 0);
+
+    const logs = hostify_(ctx.sandbox.readRows_(ctx.spreadsheet, 'DiscoveryLog'));
+    assert.equal(logs.length, 0);
+
+    const state = ctx.sandbox.discoveryLoadSourceStateInDb_(ctx.spreadsheet);
+    assert.equal(state.enabled, true);
+    assert.equal(state.consecutiveTerminalErrors, 0);
+  });
+
+  it('26. QUOTA_EXHAUSTED stops like BUDGET_BLOCKED without advancing the checkpoint or logging a per-query error', () => {
+    const ctx = createDiscoveryContext({
+      urlFetch: {
+        responses: [
+          {
+            code: 429,
+            headers: { 'content-type': 'application/json' }, // no remaining header -> remainingAfter is null
+            body: JSON.stringify({ message: 'Quota exhausted' })
+          }
+        ]
+      }
+    });
+
+    const summary = hostify_(ctx.sandbox.runDiscovery({ maxPages: 1 }));
+    assert.equal(summary.ok, false);
+    assert.equal(summary.status, 'BUDGET_BLOCKED');
+    assert.equal(summary.errorCode, 'QUOTA_EXHAUSTED');
+    assert.equal(ctx.urlFetch.calls.length, 1);
+
+    const runs = hostify_(ctx.sandbox.readRows_(ctx.spreadsheet, 'DiscoveryRuns'));
+    assert.equal(runs[0].status, 'BUDGET_BLOCKED');
+    assert.equal(runs[0].error_code, 'QUOTA_EXHAUSTED');
+    assert.equal(runs[0].error_count, 0);
+    assert.equal(runs[0].pages_attempted, 1); // quota was reserved even though the call failed
+
+    const checkpoint = JSON.parse(runs[0].checkpoint_json);
+    assert.equal(checkpoint.queryIndex, 0);
+
+    const logs = hostify_(ctx.sandbox.readRows_(ctx.spreadsheet, 'DiscoveryLog'));
+    assert.equal(logs.length, 0);
+  });
+
+  it('27. A formula-escaped external ID matches on rediscovery in the same run and across runs instead of quarantining', () => {
+    const jobA = makeJSearchJob({ job_id: '+leading-plus-1' });
+    const jobB = makeJSearchJob({ job_id: '+leading-plus-1' });
+    const jobC = makeJSearchJob({ job_id: '+leading-plus-1' });
+    const ctx = createDiscoveryContext({
+      urlFetch: {
+        responses: [
+          okResponse([jobA, jobB]),
+          okResponse([jobC])
+        ]
+      }
+    });
+
+    const summary1 = hostify_(ctx.sandbox.runDiscovery({ maxPages: 1 }));
+    assert.equal(summary1.acceptedCount, 1);
+    assert.equal(summary1.duplicateCount, 1);
+    assert.equal(summary1.quarantinedCount, 0);
+
+    let jobs = hostify_(ctx.sandbox.readRows_(ctx.spreadsheet, 'Jobs'));
+    assert.equal(jobs.length, 1);
+    assert.equal(jobs[0].external_id, "'+leading-plus-1");
+
+    // Second call resumes the same PARTIAL run at the next daily query, but
+    // Discovery.gs rebuilds its in-memory index from the stored (escaped)
+    // Jobs rows on every invocation -- exactly the "crash/rerun" path this
+    // bug hits. Counters are cumulative across the resumed run, so the
+    // page-0 accept/duplicate carry forward and only updatedCount is new.
+    const summary2 = hostify_(ctx.sandbox.runDiscovery({ maxPages: 1 }));
+    assert.equal(summary2.updatedCount, 1);
+    assert.equal(summary2.acceptedCount, 1);
+    assert.equal(summary2.duplicateCount, 1);
+    assert.equal(summary2.quarantinedCount, 0);
+
+    jobs = hostify_(ctx.sandbox.readRows_(ctx.spreadsheet, 'Jobs'));
+    assert.equal(jobs.length, 1);
+  });
+
+  it('28. runDiscovery rejects the removed nowDate option', () => {
+    const ctx = createDiscoveryContext();
+    assert.throws(() => {
+      ctx.sandbox.runDiscovery({ nowDate: new Date('2026-01-01T00:00:00.000Z') });
+    }, /Unknown option: nowDate/);
+    assert.equal(ctx.urlFetch.calls.length, 0);
+  });
+
+  it('29. A corrupt DISCOVERY_SOURCE_STATE value fails closed and recovers only through resetDiscoverySource()', () => {
+    const ctx = createDiscoveryContext({
+      urlFetch: {
+        responses: [okResponse([makeJSearchJob()])]
+      }
+    });
+    ctx.sandbox.appendRecordInDb_(ctx.spreadsheet, 'Settings', {
+      key: 'DISCOVERY_SOURCE_STATE',
+      value: 'not-valid-json{'
+    });
+
+    const state = ctx.sandbox.discoveryLoadSourceStateInDb_(ctx.spreadsheet);
+    assert.equal(state.enabled, false);
+    assert.equal(state.reason, 'STATE_CORRUPT');
+
+    const summary = hostify_(ctx.sandbox.runDiscovery({ maxPages: 1 }));
+    assert.equal(summary.status, 'SOURCE_DISABLED');
+    assert.equal(ctx.urlFetch.calls.length, 0);
+
+    const runs = hostify_(ctx.sandbox.readRows_(ctx.spreadsheet, 'DiscoveryRuns'));
+    assert.equal(runs[0].error_code, 'STATE_CORRUPT');
+
+    const resetRes = hostify_(ctx.sandbox.resetDiscoverySource());
+    assert.equal(resetRes.status, 'ok');
+    assert.equal(resetRes.enabled, true);
+
+    const recoveredState = ctx.sandbox.discoveryLoadSourceStateInDb_(ctx.spreadsheet);
+    assert.equal(recoveredState.enabled, true);
+    assert.equal(recoveredState.reason, null);
+
+    const summaryAfterReset = hostify_(ctx.sandbox.runDiscovery({ maxPages: 1 }));
+    assert.equal(summaryAfterReset.ok, true);
+    assert.equal(ctx.urlFetch.calls.length, 1);
   });
 });

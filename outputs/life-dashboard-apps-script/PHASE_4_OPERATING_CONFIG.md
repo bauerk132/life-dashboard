@@ -6,6 +6,8 @@ This document defines the operational configuration, runtime limits, security bo
 
 All implementations described herein are verified locally via deterministic unit and static analysis tests. **No live Google resources have been accessed or modified, no live Apps Script triggers have been installed, and no live RapidAPI/JSearch calls have been executed.**
 
+> **Revision note**: This document was corrected during the Claude review pass of the Phase 4B handoff (see [PHASE_4_CLAUDE_REVIEW_HANDOFF.md](./PHASE_4_CLAUDE_REVIEW_HANDOFF.md) for the full list of defects found and fixed in `Discovery.gs`). Sections 2, 3, 6, 7, 8, and 9 below have inline **Correction** notes marking where this document originally diverged from the actual code; nothing else in this document was changed. Original authorship, execution ownership, and version numbering are unchanged.
+
 ---
 
 ## 2. Required Script Properties
@@ -29,7 +31,7 @@ Database initialization is managed via `initializeDatabase()` in `Database.gs`:
 - Ensures all required sheets exist (`Tasks`, `Jobs`, `JobHistory`, `Settings`, `Applications`, `DiscoveryRuns`, `DiscoveryLog`).
 - Writes frozen column headers if sheets are newly created.
 - Formats plain-text columns with `@` number format to prevent formula injection or unwanted type coercion.
-- Creates default nonsecret records in `Settings` where needed.
+- **Correction**: `initializeDatabase()` writes only the frozen column headers (`key`, `value`, `updated_at`) for `Settings`; it does **not** write any default rows into `Settings`. In particular, it does not seed `DISCOVERY_SOURCE_STATE` — that key first appears only once `Discovery.gs` writes it (see §7's fail-closed note).
 
 ### Operational Tables for Phase 4
 
@@ -39,7 +41,7 @@ Database initialization is managed via `initializeDatabase()` in `Database.gs`:
    - `provider` (`jsearch`)
    - `mode` (`scheduled` or `manual`)
    - `date_key` (`YYYY-MM-DD` in `America/New_York`)
-   - `status` (`COMPLETED`, `PARTIAL`, `BUDGET_BLOCKED`, `RATE_LIMITED`, `SOURCE_DISABLED`, `REFUSED_NOT_TRIGGER`, `FAILED`)
+   - `status` (`IN_PROGRESS`, `COMPLETED`, `PARTIAL`, `BUDGET_BLOCKED`, `SOURCE_DISABLED`, `REFUSED_NOT_TRIGGER`, `FAILED`). Note: `RATE_LIMITED` is not a run-level status — it appears only as an `error_code` value on a `PARTIAL` run. **Correction**: an earlier revision of this document also listed `SKIPPED_OVERLAP` here; verified against `Discovery.gs` (line ~454), `'SKIPPED_OVERLAP'` is returned directly by `discoveryRunPipeline_` when the script lock is busy, *before* a `DiscoveryRuns` row is ever created for that call — it is a lock-contention return value, not a row status, and does not belong in this enum.
    - `error_code` (safe machine-readable error token)
    - `checkpoint_json` (bounded JSON with `queryIndex` and `attempts`)
    - `pages_attempted`, `raw_count`, `accepted_count`, `filtered_count`, `duplicate_count`, `updated_count`, `quarantined_count`, `error_count`
@@ -94,7 +96,7 @@ The discovery subsystem operates under strict semantic versioning tags:
 
 ### Retry and Timeout Controls
 - **Request Timeout**: 30 seconds (`JSEARCH_TIMEOUT_SECONDS_`).
-- **Retry Limit**: Max 2 retry attempts per query catalog entry (`JOB_PROFILE_.retryLimit`).
+- **Retry Limit**: `JOB_PROFILE_.retryLimit = 2` caps **total attempts** per query catalog entry at 2 (1 initial attempt + 1 retry), not 2 retries after the initial attempt. On the 2nd failure the query is logged as an error and skipped, not retried further.
 - **Backoff & Rate Limiting**: If `429 Too Many Requests` or `RATE_LIMITED` is encountered, the run halts gracefully with status `PARTIAL` and persists the checkpoint for the next window. Immediate tight retry loops are prohibited.
 - **Runtime Budget**: Maximum 270,000 ms (4.5 minutes) execution budget per run (`JOB_PROFILE_.runtimeBudgetMs`). If elapsed run time exceeds budget, the loop exits gracefully with status `PARTIAL` and `error_code: 'RUNTIME_BUDGET_EXHAUSTED'`, saving checkpoint progress.
 
@@ -104,12 +106,14 @@ The discovery subsystem operates under strict semantic versioning tags:
 
 The system maintains nonsecret health and error counters in the `Settings` sheet under the key `DISCOVERY_SOURCE_STATE`:
 
-- **Terminal Errors**: `AUTH_FAILURE`, `SUBSCRIPTION_INACTIVE`, `ENDPOINT_DISABLED`.
+- **Terminal Errors** (`disableSource: true` in the adapter's fetch result, counted toward the circuit breaker): `AUTH_FAILED` (HTTP 401/403), `NOT_SUBSCRIBED_OR_RETIRED` (HTTP 404 with the RapidAPI proxy header), `NOT_FOUND` (HTTP 404 without that header). **Correction**: these three tokens — not `AUTH_FAILURE` / `SUBSCRIPTION_INACTIVE` / `ENDPOINT_DISABLED` — are the actual values, defined in `JobSource_JSearch.gs`'s classification matrix.
+- **Non-circuit-breaker terminal stops** (halt the run immediately but do not count toward the disable threshold): `NOT_CONFIGURED` (no API key present — run ends `FAILED` without advancing the checkpoint or logging a per-query error) and `QUOTA_EXHAUSTED` (monthly/period quota exhausted — run ends `BUDGET_BLOCKED`, checkpoint preserved). Neither of these was documented in the original config.
 - **Circuit Breaker Threshold**: 2 consecutive terminal errors (`JOB_PROFILE_.terminalErrorDisableThreshold`).
 - **Disabled State**: When the consecutive terminal count reaches 2, `enabled` is flipped to `false`, `disabledAt` is timestamped, and `reason` is recorded.
 - **Fail-Safe Behavior**: Any subsequent scheduled or manual discovery run checks source state prior to calling adapters. If disabled, it logs a `SOURCE_DISABLED` run row and returns immediately without consuming quota or executing HTTP calls.
 - **Automatic Recovery**: Any successful fetch resets the consecutive terminal error counter to 0.
 - **Manual Reset**: Call `resetDiscoverySource()` to restore `enabled: true` and reset consecutive error counts to 0.
+- **Fail-Closed on Corrupt State (operator runbook)**: If the `DISCOVERY_SOURCE_STATE` row exists but its value is blank, unparseable, or not a plain JSON object, the loader treats the source as `enabled: false` with `reason: 'STATE_CORRUPT'` rather than silently defaulting to enabled. This is a new operator-visible failure mode: if discovery runs start returning `SOURCE_DISABLED` with `reason: 'STATE_CORRUPT'`, the only recovery path is calling `resetDiscoverySource()`, which overwrites the record directly rather than reading it first. This fail-closed behavior is safe for a first live run specifically because `initializeDatabase()` never seeds this key (see §3) — a missing row is read as `enabled: true` by default, which is a separate code path from a malformed-but-present row.
 
 ---
 
@@ -118,7 +122,7 @@ The system maintains nonsecret health and error counters in the `Settings` sheet
 ### Daily Scheduled Trigger
 - **Execution Target**: `runScheduledDiscovery(event)`
 - **Frequency**: Every day (7 days/week)
-- **Time**: 7:00 a.m.
+- **Time**: Configured via `ScriptApp.newTrigger(...).timeBased().atHour(JOB_PROFILE_.schedule.hour)`, where `JOB_PROFILE_.schedule.hour = 7`. **Correction**: `atHour()` selects an hour, not an exact minute, so the original doc's flat "7:00 a.m." overstates the precision actually configured. This document does not assert a specific dispatch minute or window — that is Apps Script platform behavior, not something set in this codebase, and was not independently verified here.
 - **Time Zone**: `America/New_York`
 
 ### Trigger Identity Guard
@@ -132,38 +136,38 @@ The system maintains nonsecret health and error counters in the `Settings` sheet
 - **`installDiscoveryTrigger()`**:
   - Idempotent: checks existing project triggers.
   - If a trigger for `runScheduledDiscovery` already exists, duplicates are removed and the primary is retained.
-  - Configures the daily 7:00 a.m. `America/New_York` clock trigger.
-  - Returns `{ status: 'ok', installedCount: 1, removedDuplicates: N }` without exposing internal IDs.
+  - Configures the daily `atHour(7)` `America/New_York` clock trigger (see the hour-vs-minute correction above).
+  - Returns `{ status: 'ok', handler: 'runScheduledDiscovery', installedCount: 1, removedDuplicates: N, scheduleHour: 7, timeZone: 'America/New_York' }` without exposing internal trigger IDs. **Correction**: the original doc omitted the `handler`, `scheduleHour`, and `timeZone` fields, which are present in the actual return object.
   - **Status: Local code complete. NOT executed against live Apps Script.**
 
 - **`removeDiscoveryTrigger()`**:
   - Finds all triggers with handler `runScheduledDiscovery` and removes them via `ScriptApp.deleteTrigger`.
   - Unrelated triggers (e.g. other user automation) are strictly preserved.
-  - Returns `{ status: 'ok', removedCount: N }`.
+  - Returns `{ status: 'ok', handler: 'runScheduledDiscovery', removedCount: N }`. **Correction**: the original doc omitted the `handler` field.
   - **Status: Rollback mechanism verified locally. NOT executed against live Apps Script.**
 
 - **`runDiscovery(options)`**:
   - Browser-callable manual discovery endpoint.
-  - Validates `options.maxPages` between 1 and `pagesPerManualRun` (3).
+  - Validates `options.maxPages` between 1 and `pagesPerManualRun` (3). The public option allow-list accepts only `maxPages` — a `nowDate` override is not accepted from the browser (see the Phase 4B review follow-up in §9 for why this was removed).
   - Acquires the whole-run script lock (30s timeout).
-  - Returns a sanitized browser summary (`acceptedCount`, `updatedCount`, `filteredCount`, `pagesAttempted`, etc.) with zero raw error text, query URLs, or secrets.
+  - Returns a sanitized browser summary (`acceptedCount`, `updatedCount`, `filteredCount`, `pagesAttempted`, `errorCode`, etc.) with zero raw error text, query URLs, or secrets. **Correction**: the original doc did not mention `errorCode` — it is a new field (added in the Phase 4B review follow-up) that surfaces the same safe, fixed-token terminal error code recorded in `DiscoveryRuns.error_code` (e.g. `NOT_CONFIGURED`, `QUOTA_EXHAUSTED`, `AUTH_FAILED`, `RUNTIME_BUDGET_EXHAUSTED`) or `null` when the run completed without a terminal error. It is never derived from raw exception messages or upstream response text.
 
 ---
 
 ## 9. Verification Summary
 
 ### Completed Local Verification
-- **Test Suite Status**: 100% green across 447 tests in 43 suites (`node --test`).
+- **Test Suite Status**: 100% green across **452 tests in 44 suites** (`node --test`). **Correction**: the original doc reported 447/43 — the count grew by 5 tests and 1 `describe` block during the Phase 4B Claude review follow-up (see below), and the original "24 end-to-end orchestrator scenarios" is now 29.
   - `phase1.test.js`: Database, schema, and foundation verification.
-  - `phase2.test.js`: Scoring and validation checks.
+  - `phase2.test.js`: Task lifecycle (`createTask`, `completeTask`/`reopenTask`/`archiveTask`), dashboard data (tasks and job stats), and upcoming-events retrieval. **Correction**: the original doc described this file as "Scoring and validation checks," which does not match its actual `describe` blocks.
   - `phase3.test.js`: Jobs queue, status transitions, user notes.
   - `phase4a-jsearch.test.js`: JSearch adapter normalization, quota rollover, publisher filtering.
   - `phase4b-filters.test.js`: 10-step exclusion order, remote PA rule, radius calculations.
   - `phase4b-dedupe.test.js`: L1/L2/L3 identity hierarchy, formula escape normalization, quarantine rules.
-  - `phase4b-discovery.test.js`: All 24 end-to-end orchestrator scenarios, checkpoints, locks, trigger guards, circuit breaker.
+  - `phase4b-discovery.test.js`: All 29 end-to-end orchestrator scenarios (the original 24, plus 5 added by the Phase 4B Claude review follow-up describe block covering apostrophe symmetry, `NOT_CONFIGURED`/`QUOTA_EXHAUSTED` handling, `nowDate` option removal, fail-closed `STATE_CORRUPT`, and the `errorCode` summary field), checkpoints, locks, trigger guards, circuit breaker.
   - `static-checks.test.js`: Allowlist validation, banned patterns, manifest scopes, network isolation.
-- **Git Hygiene**: `git diff --check` clean, zero whitespace/line-ending issues.
-- **Secret & PII Audit**: Count-only scan completed with **0 findings**.
+- **Git Hygiene**: `git diff --check` clean, zero whitespace/line-ending issues (autocrlf notices only).
+- **Secret & PII Audit**: Count-only scan of the Phase 4B Claude review follow-up diff completed with **0 findings**.
 
 ### Separately Authorized Future Live-Check Steps (NOT RUN)
 The following live verification steps require explicit, separate user authorization and have **NOT** been performed:

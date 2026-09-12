@@ -43,7 +43,7 @@ function runDiscovery(options) {
     }
     const keys = Object.keys(options);
     for (let i = 0; i < keys.length; i++) {
-      if (keys[i] !== 'maxPages' && keys[i] !== 'nowDate') {
+      if (keys[i] !== 'maxPages') {
         throw UserError_('Unknown option: ' + keys[i], 'INVALID_ARGUMENT');
       }
     }
@@ -56,8 +56,7 @@ function runDiscovery(options) {
     }
   }
   return discoveryRunPipeline_('manual', {
-    maxPages: maxPages,
-    nowDate: options && options.nowDate
+    maxPages: maxPages
   });
 }
 
@@ -209,20 +208,32 @@ function discoveryLoadSourceStateInDb_(ss) {
   if (matches.length > 1) {
     throw UserError_('Multiple records share key ' + DISCOVERY_SOURCE_STATE_KEY_, 'INTEGRITY_ERROR');
   }
-  if (matches.length === 1 && matches[0].value) {
-    try {
-      const parsed = JSON.parse(matches[0].value);
-      if (parsed && typeof parsed === 'object') {
-        return {
-          enabled: parsed.enabled !== false,
-          consecutiveTerminalErrors: typeof parsed.consecutiveTerminalErrors === 'number' ? parsed.consecutiveTerminalErrors : 0,
-          disabledAt: parsed.disabledAt || null,
-          reason: parsed.reason || null
-        };
+  if (matches.length === 1) {
+    if (matches[0].value) {
+      try {
+        const parsed = JSON.parse(matches[0].value);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return {
+            enabled: parsed.enabled !== false,
+            consecutiveTerminalErrors: typeof parsed.consecutiveTerminalErrors === 'number' ? parsed.consecutiveTerminalErrors : 0,
+            disabledAt: parsed.disabledAt || null,
+            reason: parsed.reason || null
+          };
+        }
+      } catch (ignore) {
+        // Fall through to the fail-closed state below.
       }
-    } catch (ignore) {
-      // Return safe default on parse error
     }
+    // The state key exists but its value is blank, unparseable, or not a
+    // plain object: fail closed rather than silently treating it as enabled.
+    // Recoverable only via resetDiscoverySource(), which overwrites this
+    // record directly instead of reading it first.
+    return {
+      enabled: false,
+      consecutiveTerminalErrors: 0,
+      disabledAt: null,
+      reason: 'STATE_CORRUPT'
+    };
   }
   return {
     enabled: true,
@@ -307,7 +318,7 @@ function discoveryBuildIndex_(existingJobs) {
     allRows.push(row);
     const src = row.source || '';
     if (row.external_id) {
-      const extKey = src + ':' + String(row.external_id);
+      const extKey = src + ':' + jobDedupeStripLeadingApostrophe_(row.external_id);
       if (!byExternalId[extKey]) byExternalId[extKey] = [];
       byExternalId[extKey].push(row);
     }
@@ -332,7 +343,7 @@ function discoveryBuildIndex_(existingJobs) {
     rows: allRows,
     findByExternalId: function (source, externalId) {
       if (!externalId) return [];
-      const key = source + ':' + String(externalId);
+      const key = source + ':' + jobDedupeStripLeadingApostrophe_(externalId);
       return (byExternalId[key] || []).slice();
     },
     findByUrlHash: function (source, urlHash) {
@@ -425,7 +436,7 @@ function discoveryPersistCheckpointInDb_(ss, runId, queryIndex, attempts, counte
  * Unified discovery pipeline execution.
  *
  * @param {string} mode - 'scheduled' | 'manual'
- * @param {Object} [options] - { maxPages, triggerEvent, nowDate }
+ * @param {Object} [options] - { maxPages, triggerEvent }
  * @returns {Object} Safe run summary
  */
 function discoveryRunPipeline_(mode, options) {
@@ -666,7 +677,6 @@ function discoveryRunPipeline_(mode, options) {
       }
 
       const queryEntry = queries[queryIndex];
-      counters.pages_attempted += 1;
       pagesExecutedThisRun += 1;
 
       const fetchResult = jsearchFetchPage_(queryEntry, {
@@ -674,6 +684,26 @@ function discoveryRunPipeline_(mode, options) {
         nowDate: new Date(),
         enabledPublishers: JOB_PROFILE_.adapters.jsearch.publishers
       });
+
+      if (fetchResult.quota && fetchResult.quota.reserved === true) {
+        counters.pages_attempted += 1;
+      }
+
+      if (fetchResult.status === 'NOT_CONFIGURED') {
+        // No API key configured: stop immediately without advancing the
+        // checkpoint, disabling the source, or logging a per-query error.
+        terminalStatus = 'FAILED';
+        terminalErrorCode = 'NOT_CONFIGURED';
+        break;
+      }
+
+      if (fetchResult.status === 'QUOTA_EXHAUSTED') {
+        // Monthly/period quota is exhausted: stop without retry, same as
+        // BUDGET_BLOCKED, and preserve the checkpoint (spec line 251).
+        terminalStatus = 'BUDGET_BLOCKED';
+        terminalErrorCode = 'QUOTA_EXHAUSTED';
+        break;
+      }
 
       if (fetchResult.status === 'BUDGET_BLOCKED') {
         terminalStatus = 'BUDGET_BLOCKED';
@@ -868,6 +898,7 @@ function discoveryRunPipeline_(mode, options) {
     const runSummary = {
       ok: finalStatus === 'COMPLETED' || finalStatus === 'PARTIAL',
       status: finalStatus,
+      errorCode: terminalErrorCode || null,
       mode: mode,
       dateKey: dateKey,
       startedAt: nowIso,
