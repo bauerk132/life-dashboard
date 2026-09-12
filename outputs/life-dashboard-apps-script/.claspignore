@@ -1,0 +1,21 @@
+# Whitelist: ignore everything, then explicitly un-ignore only the files
+# that belong in the Apps Script project. Every .gs file shares one global
+# scope in Apps Script, so the sibling folders in this directory (the old
+# pre-plan draft, the preserved Gemini submission, dev tooling, and tests)
+# must never be pushed alongside these — they declare colliding globals
+# (doGet, SCHEMA, CONFIG) and, for dev/tests, are not meant to run as
+# server-side Apps Script code at all.
+#
+# clasp is not installed in this project; this file is prepared for if/when
+# the user chooses to install and use it themselves. No push has occurred.
+**/**
+
+!appsscript.json
+!Code.gs
+!Database.gs
+!Tasks.gs
+!Calendar.gs
+!Jobs.gs
+!Index.html
+!Styles.html
+!JavaScript.html

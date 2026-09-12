@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <meta charset="utf-8">
+    <?!= include('Styles'); ?>
+  </head>
+  <body>
+    <header>
+      <h1>Life Dashboard</h1>
+      <nav aria-label="Primary">
+        <button type="button" class="nav-link" id="nav-home" data-view="home" aria-current="page">Home</button>
+        <button type="button" class="nav-link" id="nav-tasks" data-view="tasks">Tasks</button>
+        <button type="button" class="nav-link" id="nav-jobs" data-view="jobs">Jobs</button>
+      </nav>
+    </header>
+    <main>
+      <div id="live-status" role="status" aria-live="polite" class="visually-hidden"></div>
+      <div id="live-alert" role="alert" aria-live="assertive" class="visually-hidden"></div>
+
+      <section id="view-home" aria-labelledby="home-heading">
+        <h2 id="home-heading" tabindex="-1">Home</h2>
+        <p id="connection-status">Checking connection&hellip;</p>
+
+        <section class="card" id="dashboard-card" aria-labelledby="dashboard-heading">
+          <h3 id="dashboard-heading">Today</h3>
+          <div id="dashboard-body" aria-busy="true"></div>
+        </section>
+
+        <section class="card" id="calendar-card" aria-labelledby="calendar-heading">
+          <h3 id="calendar-heading">Upcoming events</h3>
+          <div id="calendar-body" aria-busy="true"></div>
+        </section>
+      </section>
+
+      <section id="view-tasks" aria-labelledby="tasks-heading" hidden>
+        <h2 id="tasks-heading" tabindex="-1">Tasks</h2>
+
+        <form id="add-task-form" class="card" novalidate>
+          <h3 id="add-task-heading">Add a task</h3>
+          <div class="field">
+            <label for="task-title">Title</label>
+            <input type="text" id="task-title" name="title" maxlength="200" autocomplete="off" required>
+          </div>
+          <div class="field">
+            <label for="task-due-date">Due date (optional)</label>
+            <input type="date" id="task-due-date" name="dueDate">
+          </div>
+          <div class="field">
+            <label for="task-priority">Priority</label>
+            <select id="task-priority" name="priority">
+              <option value="Low">Low</option>
+              <option value="Medium" selected>Medium</option>
+              <option value="High">High</option>
+            </select>
+          </div>
+          <p id="add-task-error" class="state-message is-error" hidden></p>
+          <button type="submit" id="add-task-submit">Add task</button>
+        </form>
+
+        <div id="tasks-container" aria-busy="true"></div>
+      </section>
+
+      <section id="view-jobs" aria-labelledby="jobs-heading" hidden>
+        <h2 id="jobs-heading" tabindex="-1">Jobs</h2>
+        <p class="section-intro">
+          Review only jobs already stored in your sheet. Opening this queue
+          never searches sources or runs an AI model.
+        </p>
+        <section class="card" aria-labelledby="jobs-queue-heading">
+          <div class="section-heading-row">
+            <h3 id="jobs-queue-heading">Stored job queue</h3>
+            <button type="button" id="jobs-refresh" class="secondary-button">Refresh queue</button>
+          </div>
+          <div id="jobs-controls" class="jobs-controls" hidden>
+            <div class="field">
+              <label for="jobs-filter">Show</label>
+              <select id="jobs-filter">
+                <option value="all">All active jobs</option>
+                <option value="strong">80%+ match</option>
+                <option value="remote">Remote</option>
+                <option value="new-today">New today</option>
+                <option value="saved">Saved</option>
+                <option value="ready">Ready to apply</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="jobs-sort">Sort by</label>
+              <select id="jobs-sort">
+                <option value="match">Match score</option>
+                <option value="posted">Posting date</option>
+                <option value="discovered">Discovery date</option>
+                <option value="salary">Salary</option>
+              </select>
+            </div>
+          </div>
+          <div id="jobs-container" aria-busy="false"></div>
+        </section>
+      </section>
+    </main>
+    <?!= include('JavaScript'); ?>
+  </body>
+</html>

@@ -1,0 +1,1088 @@
+<script>
+  (function () {
+    'use strict';
+
+    // Keep the review queue broad enough for a career transition. The
+    // server uses the same threshold for the Home strong-match count.
+    var STRONG_MATCH_THRESHOLD = 80;
+
+    // ---------------------------------------------------------------------
+    // Element references
+    // ---------------------------------------------------------------------
+    var navButtons = Array.prototype.slice.call(document.querySelectorAll('.nav-link'));
+    var views = {
+      home: document.getElementById('view-home'),
+      tasks: document.getElementById('view-tasks'),
+      jobs: document.getElementById('view-jobs')
+    };
+    var headings = {
+      home: document.getElementById('home-heading'),
+      tasks: document.getElementById('tasks-heading'),
+      jobs: document.getElementById('jobs-heading')
+    };
+
+    var liveStatusEl = document.getElementById('live-status');
+    var liveAlertEl = document.getElementById('live-alert');
+    var connectionStatusEl = document.getElementById('connection-status');
+
+    var dashboardBodyEl = document.getElementById('dashboard-body');
+    var calendarBodyEl = document.getElementById('calendar-body');
+    var tasksContainerEl = document.getElementById('tasks-container');
+    var jobsContainerEl = document.getElementById('jobs-container');
+    var jobsControlsEl = document.getElementById('jobs-controls');
+    var jobsFilterEl = document.getElementById('jobs-filter');
+    var jobsSortEl = document.getElementById('jobs-sort');
+    var jobsRefreshBtn = document.getElementById('jobs-refresh');
+
+    var addTaskFormEl = document.getElementById('add-task-form');
+    var taskTitleInput = document.getElementById('task-title');
+    var taskDueDateInput = document.getElementById('task-due-date');
+    var taskPriorityInput = document.getElementById('task-priority');
+    var addTaskSubmitBtn = document.getElementById('add-task-submit');
+    var addTaskErrorEl = document.getElementById('add-task-error');
+
+    // ---------------------------------------------------------------------
+    // Small helpers
+    // ---------------------------------------------------------------------
+    function clearChildren(el) {
+      while (el.firstChild) el.removeChild(el.firstChild);
+    }
+
+    // Cleared then re-set on the next tick so the same message announced
+    // twice in a row (e.g. two "Task added." in succession) still fires a
+    // fresh assistive-tech announcement rather than being ignored as an
+    // unchanged live-region value.
+    function announce(message) {
+      liveStatusEl.textContent = '';
+      window.setTimeout(function () { liveStatusEl.textContent = message; }, 30);
+    }
+
+    function announceAlert(message) {
+      liveAlertEl.textContent = '';
+      window.setTimeout(function () { liveAlertEl.textContent = message; }, 30);
+    }
+
+    function uuidv4() {
+      if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        return window.crypto.randomUUID();
+      }
+      // Small well-known RFC4122 v4 fallback for older browsers without
+      // crypto.randomUUID(). Not cryptographically strong, but this id is
+      // only ever used as an idempotency/primary key, never as a secret.
+      return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+        var r = (Math.random() * 16) | 0;
+        var v = c === 'x' ? r : (r & 0x3) | 0x8;
+        return v.toString(16);
+      });
+    }
+
+    // Parses a 'yyyy-MM-dd' string as a LOCAL date (new Date(y, m-1, d)),
+    // never new Date('yyyy-MM-dd') — the latter parses as UTC midnight and
+    // can display as the wrong day depending on the viewer's time zone.
+    function parseDateOnlyLocal(dateStr) {
+      var parts = dateStr.split('-');
+      var y = Number(parts[0]);
+      var m = Number(parts[1]);
+      var d = Number(parts[2]);
+      return new Date(y, m - 1, d);
+    }
+
+    function formatDateOnlyForDisplay(dateStr) {
+      var d = parseDateOnlyLocal(dateStr);
+      return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+    }
+
+    function formatDateTimeForDisplay(isoStr) {
+      var d = new Date(isoStr);
+      return d.toLocaleString(undefined, {
+        year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
+      });
+    }
+
+    function formatIsoDateOnlyForDisplay(isoStr) {
+      var d = new Date(isoStr);
+      return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+    }
+
+    function buildRetryButton(onClick) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'retry-button';
+      btn.textContent = 'Retry';
+      btn.addEventListener('click', onClick);
+      return btn;
+    }
+
+    function buildStateMessage(text, isError) {
+      var p = document.createElement('p');
+      p.className = isError ? 'state-message is-error' : 'state-message';
+      p.textContent = text;
+      return p;
+    }
+
+    // ---------------------------------------------------------------------
+    // View router — Home / Tasks / Jobs. Switching views moves focus to
+    // the destination view's heading so keyboard and screen-reader users
+    // land somewhere sensible instead of on an invisible button.
+    // ---------------------------------------------------------------------
+    function switchView(name) {
+      if (!views[name]) return;
+
+      Object.keys(views).forEach(function (key) {
+        views[key].hidden = key !== name;
+      });
+      navButtons.forEach(function (btn) {
+        if (btn.getAttribute('data-view') === name) {
+          btn.setAttribute('aria-current', 'page');
+        } else {
+          btn.removeAttribute('aria-current');
+        }
+      });
+
+      var heading = headings[name];
+      if (heading) heading.focus();
+
+      // Queue data is deliberately lazy-loaded. Merely opening Home or
+      // refreshing Tasks never touches it, and its server endpoint reads
+      // stored Sheet rows only — no job-source search or model work occurs.
+      if (name === 'jobs' && jobsState.status === 'not-loaded') {
+        loadJobsQueue(false);
+      }
+    }
+
+    navButtons.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        switchView(btn.getAttribute('data-view'));
+      });
+    });
+
+    // ---------------------------------------------------------------------
+    // getAppStatus — unchanged contract from Phase 1, re-homed onto the
+    // Home view's #connection-status element and mirrored once into the
+    // shared live regions instead of carrying its own role="status".
+    // ---------------------------------------------------------------------
+    function renderConnectionSuccess(result) {
+      connectionStatusEl.textContent = result.message;
+      connectionStatusEl.setAttribute('data-status', result.status);
+      if (result.status === 'ok') {
+        announce(result.message);
+      } else {
+        announceAlert(result.message);
+      }
+    }
+
+    function renderConnectionFailure() {
+      var msg = 'The dashboard could not connect to its database.';
+      connectionStatusEl.textContent = msg;
+      connectionStatusEl.setAttribute('data-status', 'error');
+      announceAlert(msg);
+    }
+
+    google.script.run
+      .withSuccessHandler(renderConnectionSuccess)
+      .withFailureHandler(renderConnectionFailure)
+      .getAppStatus();
+
+    // ---------------------------------------------------------------------
+    // Dashboard data store — shared source of truth for the Home stats
+    // card and the Tasks list. Loaded independently of the calendar card,
+    // and re-fetched (never optimistically patched) after every
+    // successful task mutation.
+    // ---------------------------------------------------------------------
+    var dashboardState = {
+      status: 'loading', // 'loading' | 'ok' | 'error'
+      data: null,
+      errorMessage: ''
+    };
+
+    function loadDashboardData(isRefresh) {
+      dashboardState.status = 'loading';
+      renderDashboardBody();
+      renderTasksContainer();
+
+      google.script.run
+        .withSuccessHandler(function (result) {
+          dashboardState.status = 'ok';
+          dashboardState.data = result;
+          dashboardState.errorMessage = '';
+          renderDashboardBody();
+          renderTasksContainer();
+        })
+        .withFailureHandler(function (err) {
+          dashboardState.status = 'error';
+          dashboardState.errorMessage = (err && err.message) ? err.message : 'The dashboard could not load its data.';
+          renderDashboardBody();
+          renderTasksContainer();
+        })
+        .getDashboardData();
+      // isRefresh is not branched on here: the render functions themselves
+      // tell "first load" (no data yet -> full loading state) apart from
+      // "refresh" (data already present -> keep the rendered content and
+      // only flip aria-busy) by checking dashboardState.data, so a stale
+      // list never flashes empty or vanishes out from under the user.
+      void isRefresh;
+    }
+
+    function renderDashboardBody() {
+      var container = dashboardBodyEl;
+      var hasData = dashboardState.data !== null;
+
+      if (dashboardState.status === 'loading' && !hasData) {
+        container.setAttribute('aria-busy', 'true');
+        clearChildren(container);
+        container.appendChild(buildStateMessage('Loading today’s overview…', false));
+        return;
+      }
+
+      if (dashboardState.status === 'loading' && hasData) {
+        // Refreshing after a mutation: keep the currently-rendered stats
+        // on screen, just mark the container busy.
+        container.setAttribute('aria-busy', 'true');
+        return;
+      }
+
+      container.setAttribute('aria-busy', 'false');
+
+      if (dashboardState.status === 'error') {
+        clearChildren(container);
+        container.appendChild(buildStateMessage(dashboardState.errorMessage, true));
+        container.appendChild(buildRetryButton(function () { loadDashboardData(false); }));
+        return;
+      }
+
+      // status === 'ok'
+      clearChildren(container);
+      var data = dashboardState.data;
+
+      var todayP = document.createElement('p');
+      todayP.textContent = 'Today: ' + formatDateOnlyForDisplay(data.today);
+      container.appendChild(todayP);
+
+      var dl = document.createElement('dl');
+      dl.className = 'stats-grid';
+
+      function addStat(label, value) {
+        var item = document.createElement('div');
+        item.className = 'stat';
+        var dt = document.createElement('dt');
+        dt.textContent = label;
+        var dd = document.createElement('dd');
+        dd.textContent = value;
+        item.appendChild(dt);
+        item.appendChild(dd);
+        dl.appendChild(item);
+      }
+
+      addStat('Open tasks', String(data.stats.openTasks));
+      addStat('Completed tasks', String(data.stats.completedTasks));
+      addStat('Strong-match jobs', data.stats.strongMatchJobs === null ? '— (unavailable)' : String(data.stats.strongMatchJobs));
+      addStat('Applications sent', data.stats.applicationsSent === null ? '— (unavailable)' : String(data.stats.applicationsSent));
+
+      container.appendChild(dl);
+    }
+
+    // ---------------------------------------------------------------------
+    // Tasks list — rendered from the same dashboardState as the Home
+    // stats card. Per-task action buttons (Complete/Reopen/Archive) are
+    // shown only when the server would actually accept that transition
+    // for the task's current status.
+    // ---------------------------------------------------------------------
+    var taskActionPending = {}; // task id -> true while a mutation is in-flight
+    var tasksActionError = null; // last task-action failure message, shown inline
+
+    function renderTasksContainer() {
+      var container = tasksContainerEl;
+      var hasData = dashboardState.data !== null;
+
+      if (dashboardState.status === 'loading' && !hasData) {
+        container.setAttribute('aria-busy', 'true');
+        clearChildren(container);
+        container.appendChild(buildStateMessage('Loading tasks…', false));
+        return;
+      }
+
+      if (dashboardState.status === 'loading' && hasData) {
+        container.setAttribute('aria-busy', 'true');
+        return;
+      }
+
+      container.setAttribute('aria-busy', 'false');
+
+      if (dashboardState.status === 'error') {
+        clearChildren(container);
+        container.appendChild(buildStateMessage(dashboardState.errorMessage, true));
+        container.appendChild(buildRetryButton(function () { loadDashboardData(false); }));
+        return;
+      }
+
+      // status === 'ok'
+      clearChildren(container);
+
+      if (tasksActionError) {
+        container.appendChild(buildStateMessage(tasksActionError, true));
+      }
+
+      var tasks = dashboardState.data.tasks;
+
+      if (tasks.length === 0) {
+        container.appendChild(buildStateMessage('No tasks yet. Add one above to get started.', false));
+        return;
+      }
+
+      var todayStr = dashboardState.data.today;
+      var ul = document.createElement('ul');
+      ul.className = 'tasks-list';
+      tasks.forEach(function (task) {
+        ul.appendChild(buildTaskListItem(task, todayStr));
+      });
+      container.appendChild(ul);
+    }
+
+    function buildTaskListItem(task, todayStr) {
+      var li = document.createElement('li');
+      li.className = 'task-item task-status-' + task.status.toLowerCase();
+
+      var info = document.createElement('div');
+      info.className = 'task-info';
+
+      var titleEl = document.createElement('span');
+      titleEl.className = 'task-title';
+      titleEl.textContent = task.title;
+      info.appendChild(titleEl);
+
+      var isOverdue = false;
+      var metaParts = [];
+      if (task.due_date) {
+        // Both task.due_date and todayStr are 'yyyy-MM-dd' strings from
+        // the same server (script time zone), so a plain string compare
+        // is correct here — no local-date construction/timezone drift to
+        // worry about, unlike rendering the date for display.
+        isOverdue = task.status === 'Open' && task.due_date < todayStr;
+        metaParts.push('Due ' + formatDateOnlyForDisplay(task.due_date) + (isOverdue ? ' (overdue)' : ''));
+      }
+      metaParts.push('Priority: ' + task.priority);
+      metaParts.push('Status: ' + task.status);
+
+      var metaEl = document.createElement('span');
+      metaEl.className = 'task-meta' + (isOverdue ? ' is-overdue' : '');
+      metaEl.textContent = metaParts.join(' · ');
+      info.appendChild(metaEl);
+
+      li.appendChild(info);
+
+      var actions = document.createElement('div');
+      actions.className = 'task-actions';
+      var pending = !!taskActionPending[task.id];
+
+      if (task.status === 'Open') {
+        actions.appendChild(buildTaskActionButton(task, 'Complete', pending, function () {
+          runTaskAction(task.id, 'completeTask', 'Task completed.');
+        }));
+        actions.appendChild(buildTaskActionButton(task, 'Archive', pending, function () {
+          runTaskAction(task.id, 'archiveTask', 'Task archived.');
+        }));
+      } else if (task.status === 'Done') {
+        actions.appendChild(buildTaskActionButton(task, 'Reopen', pending, function () {
+          runTaskAction(task.id, 'reopenTask', 'Task reopened.');
+        }));
+        actions.appendChild(buildTaskActionButton(task, 'Archive', pending, function () {
+          runTaskAction(task.id, 'archiveTask', 'Task archived.');
+        }));
+      }
+      // Archived tasks never reach this list: getDashboardData() already
+      // excludes status "Archived", so no action set is needed for it.
+
+      li.appendChild(actions);
+      return li;
+    }
+
+    function buildTaskActionButton(task, label, pending, onClick) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = label;
+      btn.disabled = pending;
+      // setAttribute never parses its value as markup, so building this
+      // string from task.title (server-derived free text) is safe — this
+      // is not an innerHTML/markup-injection path.
+      btn.setAttribute('aria-label', label + ' "' + task.title + '"');
+      btn.addEventListener('click', onClick);
+      return btn;
+    }
+
+    // Only the acted-on task's own buttons are disabled while its request
+    // is in flight — the rest of the list stays interactive.
+    function runTaskAction(id, fnName, successMessage) {
+      taskActionPending[id] = true;
+      tasksActionError = null;
+      renderTasksContainer();
+
+      google.script.run
+        .withSuccessHandler(function () {
+          delete taskActionPending[id];
+          announce(successMessage);
+          loadDashboardData(true);
+        })
+        .withFailureHandler(function (err) {
+          delete taskActionPending[id];
+          var msg = (err && err.message) ? err.message : 'That action could not be completed.';
+          tasksActionError = msg;
+          announceAlert(msg);
+          renderTasksContainer();
+        })
+        [fnName](id);
+    }
+
+    // ---------------------------------------------------------------------
+    // Add-task form — client-generates the task's UUID so a failed/
+    // ambiguous request can be retried safely: the same id is reused
+    // across retries of the *same* (trimmed) title, and only replaced
+    // once a create actually succeeds or the title genuinely changes.
+    // ---------------------------------------------------------------------
+    var pendingCreateId = null;
+    var pendingCreateTitle = null;
+    var addTaskPending = false;
+
+    function setAddTaskFormDisabled(disabled) {
+      taskTitleInput.disabled = disabled;
+      taskDueDateInput.disabled = disabled;
+      taskPriorityInput.disabled = disabled;
+      addTaskSubmitBtn.disabled = disabled;
+    }
+
+    function showAddTaskError(message) {
+      if (message) {
+        addTaskErrorEl.textContent = message;
+        addTaskErrorEl.hidden = false;
+      } else {
+        addTaskErrorEl.textContent = '';
+        addTaskErrorEl.hidden = true;
+      }
+    }
+
+    addTaskFormEl.addEventListener('submit', function (evt) {
+      evt.preventDefault();
+      if (addTaskPending) return;
+
+      var title = taskTitleInput.value.trim();
+      if (title.length === 0) {
+        showAddTaskError('A title is required.');
+        announceAlert('A title is required.');
+        taskTitleInput.focus();
+        return;
+      }
+
+      var dueDate = taskDueDateInput.value; // '' or 'yyyy-MM-dd' from <input type="date">
+      var priority = taskPriorityInput.value;
+
+      // Same (trimmed) title as the last not-yet-confirmed attempt: reuse
+      // its id so the server recognizes this as a retry, not a new task.
+      // Any other title mints a fresh id.
+      if (pendingCreateId === null || pendingCreateTitle !== title) {
+        pendingCreateId = uuidv4();
+        pendingCreateTitle = title;
+      }
+
+      addTaskPending = true;
+      setAddTaskFormDisabled(true);
+      showAddTaskError('');
+
+      google.script.run
+        .withSuccessHandler(function () {
+          pendingCreateId = null;
+          pendingCreateTitle = null;
+          addTaskPending = false;
+          setAddTaskFormDisabled(false);
+          showAddTaskError('');
+          taskTitleInput.value = '';
+          taskDueDateInput.value = '';
+          taskPriorityInput.value = 'Medium';
+          announce('Task added.');
+          loadDashboardData(true);
+        })
+        .withFailureHandler(function (err) {
+          addTaskPending = false;
+          setAddTaskFormDisabled(false);
+          var msg = (err && err.message) ? err.message : 'The task could not be added.';
+          showAddTaskError(msg);
+          announceAlert(msg);
+          // pendingCreateId/pendingCreateTitle deliberately kept as-is so a
+          // same-title retry reuses this id per the idempotency contract.
+        })
+        .createTask({
+          id: pendingCreateId,
+          title: title,
+          dueDate: dueDate,
+          priority: priority
+        });
+    });
+
+    // ---------------------------------------------------------------------
+    // Jobs queue — lazy-loaded, stored records only. The server validates
+    // every mutation; client filters and sort preferences are presentational
+    // conveniences and never grant a browser any additional authority.
+    // ---------------------------------------------------------------------
+    var jobsState = {
+      status: 'not-loaded', // 'not-loaded' | 'loading' | 'ok' | 'error'
+      data: null,
+      errorMessage: '',
+      filter: 'all',
+      sort: 'match',
+      pending: {}, // job id -> true while an action or note is in flight
+      histories: {} // job id -> {status, data, errorMessage}
+    };
+
+    function loadJobsQueue(isRefresh) {
+      jobsState.status = 'loading';
+      jobsState.errorMessage = '';
+      jobsRefreshBtn.disabled = true;
+      renderJobsContainer();
+
+      google.script.run
+        .withSuccessHandler(function (result) {
+          jobsRefreshBtn.disabled = false;
+          if (result && result.status === 'ok') {
+            jobsState.status = 'ok';
+            jobsState.data = result;
+            jobsState.errorMessage = '';
+          } else {
+            jobsState.status = 'error';
+            jobsState.errorMessage = (result && result.message) ? result.message : 'The stored job queue is unavailable right now.';
+          }
+          renderJobsContainer();
+        })
+        .withFailureHandler(function (err) {
+          jobsRefreshBtn.disabled = false;
+          jobsState.status = 'error';
+          jobsState.errorMessage = (err && err.message) ? err.message : 'The stored job queue is unavailable right now.';
+          renderJobsContainer();
+        })
+        .getJobsQueue();
+      void isRefresh;
+    }
+
+    jobsRefreshBtn.addEventListener('click', function () { loadJobsQueue(true); });
+    jobsFilterEl.addEventListener('change', function () {
+      jobsState.filter = jobsFilterEl.value;
+      renderJobsContainer();
+    });
+    jobsSortEl.addEventListener('change', function () {
+      jobsState.sort = jobsSortEl.value;
+      renderJobsContainer();
+    });
+
+    function jobSortValue(job, sort) {
+      if (sort === 'match') return job.overallMatch;
+      if (sort === 'posted') return job.postedAt ? new Date(job.postedAt).getTime() : null;
+      if (sort === 'discovered') return job.discoveredAt ? new Date(job.discoveredAt).getTime() : null;
+      if (sort === 'salary') {
+        return job.salaryMax !== null ? job.salaryMax : job.salaryMin;
+      }
+      return null;
+    }
+
+    function compareJobs(jobA, jobB) {
+      var valueA = jobSortValue(jobA, jobsState.sort);
+      var valueB = jobSortValue(jobB, jobsState.sort);
+      var hasA = typeof valueA === 'number' && Number.isFinite(valueA);
+      var hasB = typeof valueB === 'number' && Number.isFinite(valueB);
+
+      // Every supported sort is descending. Unavailable or malformed values
+      // are normalized to null server-side and consistently appear last;
+      // title/id then provide a stable, deterministic tie-breaker.
+      if (hasA && !hasB) return -1;
+      if (!hasA && hasB) return 1;
+      if (hasA && hasB && valueA !== valueB) return valueB - valueA;
+      var titleOrder = jobA.title.localeCompare(jobB.title);
+      return titleOrder || jobA.id.localeCompare(jobB.id);
+    }
+
+    function filteredAndSortedJobs() {
+      if (!jobsState.data) return [];
+      var today = jobsState.data.today;
+      return jobsState.data.activeJobs.filter(function (job) {
+        if (jobsState.filter === 'strong') {
+          return job.overallMatch !== null && job.overallMatch >= STRONG_MATCH_THRESHOLD;
+        }
+        if (jobsState.filter === 'remote') return job.remote === true;
+        if (jobsState.filter === 'new-today') return job.discoveredDate === today;
+        if (jobsState.filter === 'saved') return job.status === 'Saved';
+        if (jobsState.filter === 'ready') return job.status === 'Ready to Apply';
+        return true;
+      }).sort(compareJobs);
+    }
+
+    function renderJobsContainer() {
+      var container = jobsContainerEl;
+      var hasData = jobsState.data !== null;
+
+      if (jobsState.status === 'not-loaded') {
+        jobsControlsEl.hidden = true;
+        container.setAttribute('aria-busy', 'false');
+        clearChildren(container);
+        container.appendChild(buildStateMessage('Open this view to load stored job records.', false));
+        return;
+      }
+
+      if (jobsState.status === 'loading' && !hasData) {
+        jobsControlsEl.hidden = true;
+        container.setAttribute('aria-busy', 'true');
+        clearChildren(container);
+        container.appendChild(buildStateMessage('Loading stored job records…', false));
+        return;
+      }
+
+      if (jobsState.status === 'loading' && hasData) {
+        jobsControlsEl.hidden = false;
+        container.setAttribute('aria-busy', 'true');
+        return;
+      }
+
+      container.setAttribute('aria-busy', 'false');
+      clearChildren(container);
+
+      if (jobsState.status === 'error') {
+        jobsControlsEl.hidden = true;
+        container.appendChild(buildStateMessage(jobsState.errorMessage, true));
+        container.appendChild(buildRetryButton(function () { loadJobsQueue(false); }));
+        return;
+      }
+
+      jobsControlsEl.hidden = false;
+      jobsFilterEl.value = jobsState.filter;
+      jobsSortEl.value = jobsState.sort;
+
+      var visibleJobs = filteredAndSortedJobs();
+      if (visibleJobs.length === 0) {
+        var emptyMessage = jobsState.data.activeJobs.length === 0
+          ? 'No active stored jobs are ready to review.'
+          : 'No active stored jobs match this filter.';
+        container.appendChild(buildStateMessage(emptyMessage, false));
+      } else {
+        var list = document.createElement('ul');
+        list.className = 'jobs-list';
+        visibleJobs.forEach(function (job) { list.appendChild(buildJobCard(job)); });
+        container.appendChild(list);
+      }
+
+      if (jobsState.data.rejectedJobs.length > 0) {
+        var rejectedDetails = document.createElement('details');
+        rejectedDetails.className = 'job-history';
+        var rejectedSummary = document.createElement('summary');
+        rejectedSummary.textContent = 'Rejected jobs (' + jobsState.data.rejectedJobs.length + ') — recoverable';
+        rejectedDetails.appendChild(rejectedSummary);
+        var rejectedList = document.createElement('ul');
+        rejectedList.className = 'jobs-list';
+        jobsState.data.rejectedJobs.slice().sort(compareJobs).forEach(function (job) {
+          rejectedList.appendChild(buildJobCard(job));
+        });
+        rejectedDetails.appendChild(rejectedList);
+        container.appendChild(rejectedDetails);
+      }
+
+      if (jobsState.data.quarantined.length > 0) {
+        var quarantine = document.createElement('details');
+        quarantine.className = 'job-quarantine';
+        var quarantineSummary = document.createElement('summary');
+        quarantineSummary.textContent = jobsState.data.quarantined.length + ' malformed stored record(s) skipped';
+        quarantine.appendChild(quarantineSummary);
+        var quarantineList = document.createElement('ul');
+        jobsState.data.quarantined.forEach(function (issue) {
+          var item = document.createElement('li');
+          item.textContent = 'Sheet row ' + issue.rowNumber + ': ' + issue.reason + '.';
+          quarantineList.appendChild(item);
+        });
+        quarantine.appendChild(quarantineList);
+        container.appendChild(quarantine);
+      }
+    }
+
+    function jobStatusActions(job) {
+      if (job.status === 'New') return [{ target: 'Reviewed', label: 'Mark reviewed' }];
+      if (job.status === 'Reviewed') return [
+        { target: 'Saved', label: 'Save' }, { target: 'Rejected', label: 'Reject', destructive: true }
+      ];
+      if (job.status === 'Saved') return [
+        { target: 'Ready to Apply', label: 'Ready to apply' }, { target: 'Rejected', label: 'Reject', destructive: true }
+      ];
+      if (job.status === 'Ready to Apply') return [
+        { target: 'Applied', label: 'Mark applied' }, { target: 'Rejected', label: 'Reject', destructive: true }
+      ];
+      if (job.status === 'Applied') return [{ target: 'Interview', label: 'Mark interview' }];
+      if (job.status === 'Interview') return [{ target: 'Offer', label: 'Mark offer' }];
+      if (job.status === 'Rejected') return [{ target: 'Reviewed', label: 'Recover to reviewed' }];
+      return [];
+    }
+
+    function formatJobSalary(job) {
+      if (job.salaryMin === null && job.salaryMax === null) return 'Salary not supplied';
+      var prefix = job.currency ? job.currency + ' ' : '';
+      if (job.salaryMin !== null && job.salaryMax !== null) {
+        return prefix + job.salaryMin.toLocaleString() + '–' + job.salaryMax.toLocaleString();
+      }
+      return prefix + (job.salaryMax !== null ? job.salaryMax : job.salaryMin).toLocaleString();
+    }
+
+    function jobFreshnessLabel(job) {
+      if (job.freshness === 'recent') return 'Last seen recently';
+      if (job.freshness === 'stale') return 'Not seen in the last 14 days';
+      return 'Last-seen time not stored';
+    }
+
+    function appendJobMeta(list, label, value) {
+      var item = document.createElement('li');
+      var strong = document.createElement('strong');
+      strong.textContent = label + ': ';
+      item.appendChild(strong);
+      item.appendChild(document.createTextNode(value));
+      list.appendChild(item);
+    }
+
+    function buildJobCard(job) {
+      var item = document.createElement('li');
+      item.className = 'job-card';
+
+      var header = document.createElement('div');
+      header.className = 'job-card-header';
+      var headingGroup = document.createElement('div');
+      var title = document.createElement('h3');
+      title.className = 'job-card-title';
+      title.textContent = job.title;
+      headingGroup.appendChild(title);
+      var company = document.createElement('p');
+      company.className = 'job-company';
+      company.textContent = job.company;
+      headingGroup.appendChild(company);
+      header.appendChild(headingGroup);
+      var status = document.createElement('span');
+      status.className = 'job-status';
+      status.textContent = job.status;
+      header.appendChild(status);
+      item.appendChild(header);
+
+      var meta = document.createElement('ul');
+      meta.className = 'job-meta-list';
+      appendJobMeta(meta, 'Location', job.location + ' · ' + job.remoteLabel);
+      appendJobMeta(meta, 'Match', job.overallMatch === null ? 'Not scored' : job.overallMatch + '%');
+      appendJobMeta(meta, 'Salary', formatJobSalary(job));
+      appendJobMeta(meta, 'Posted', job.postedDate ? formatDateOnlyForDisplay(job.postedDate) : 'Not supplied');
+      appendJobMeta(meta, 'Discovered', job.discoveredDate ? formatDateOnlyForDisplay(job.discoveredDate) : 'Not supplied');
+      appendJobMeta(meta, 'Source', job.source);
+      appendJobMeta(meta, 'External ID', job.externalId || 'Not stored');
+      appendJobMeta(meta, 'Last seen', job.lastSeenAt ? formatDateTimeForDisplay(job.lastSeenAt) : 'Not stored');
+      item.appendChild(meta);
+
+      var freshness = document.createElement('span');
+      freshness.className = 'job-freshness is-' + job.freshness;
+      freshness.textContent = jobFreshnessLabel(job);
+      item.appendChild(freshness);
+
+      var sourceLink = document.createElement('a');
+      sourceLink.className = 'job-source-link';
+      sourceLink.textContent = 'Open source listing';
+      // sourceUrl is server-validated by validateSourceUrl_ before it is
+      // returned; using setAttribute avoids any HTML parsing path.
+      sourceLink.setAttribute('href', job.sourceUrl);
+      sourceLink.setAttribute('target', '_blank');
+      sourceLink.setAttribute('rel', 'noopener noreferrer');
+      item.appendChild(sourceLink);
+
+      if (job.recommendation || job.whyMatches || job.gaps) {
+        var explanation = document.createElement('div');
+        explanation.className = 'job-explanation';
+        if (job.recommendation) {
+          var recommendation = document.createElement('p');
+          recommendation.textContent = 'Recommendation: ' + job.recommendation;
+          explanation.appendChild(recommendation);
+        }
+        if (job.whyMatches) {
+          var reasons = document.createElement('p');
+          reasons.textContent = 'Why it matches: ' + job.whyMatches;
+          explanation.appendChild(reasons);
+        }
+        if (job.gaps) {
+          var gaps = document.createElement('p');
+          gaps.textContent = 'Gaps: ' + job.gaps;
+          explanation.appendChild(gaps);
+        }
+        item.appendChild(explanation);
+      }
+
+      if (job.notes) {
+        var notes = document.createElement('div');
+        notes.className = 'job-notes';
+        var notesHeading = document.createElement('p');
+        notesHeading.textContent = 'Notes';
+        var notesText = document.createElement('p');
+        notesText.textContent = job.notes;
+        notes.appendChild(notesHeading);
+        notes.appendChild(notesText);
+        item.appendChild(notes);
+      }
+
+      item.appendChild(buildJobActions(job));
+      item.appendChild(buildJobNoteForm(job));
+      item.appendChild(buildJobHistory(job));
+      return item;
+    }
+
+    function buildJobActions(job) {
+      var actions = document.createElement('div');
+      actions.className = 'job-actions';
+      var pending = !!jobsState.pending[job.id];
+      jobStatusActions(job).forEach(function (action) {
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = action.label;
+        button.disabled = pending;
+        if (action.destructive) button.className = 'is-destructive';
+        button.setAttribute('aria-label', action.label + ' for "' + job.title + '"');
+        button.addEventListener('click', function () {
+          runJobStatusAction(job.id, action.target, action.label);
+        });
+        actions.appendChild(button);
+      });
+      return actions;
+    }
+
+    function runJobStatusAction(jobId, targetStatus, label) {
+      if (jobsState.pending[jobId]) return;
+      jobsState.pending[jobId] = true;
+      renderJobsContainer();
+      google.script.run
+        .withSuccessHandler(function () {
+          delete jobsState.pending[jobId];
+          delete jobsState.histories[jobId];
+          announce(label + '.');
+          loadJobsQueue(true);
+        })
+        .withFailureHandler(function (err) {
+          delete jobsState.pending[jobId];
+          jobsState.errorMessage = (err && err.message) ? err.message : 'That job action could not be completed.';
+          announceAlert(jobsState.errorMessage);
+          renderJobsContainer();
+        })
+        .setJobStatus(jobId, targetStatus);
+    }
+
+    function buildJobNoteForm(job) {
+      var form = document.createElement('form');
+      form.className = 'job-note-form';
+      var label = document.createElement('label');
+      var textareaId = 'job-note-' + job.id;
+      label.setAttribute('for', textareaId);
+      label.textContent = 'Add note';
+      var textarea = document.createElement('textarea');
+      textarea.id = textareaId;
+      textarea.maxLength = 1000;
+      textarea.setAttribute('aria-label', 'Add a note for "' + job.title + '"');
+      var button = document.createElement('button');
+      button.type = 'submit';
+      button.textContent = 'Save note';
+      button.disabled = !!jobsState.pending[job.id];
+      form.appendChild(label);
+      form.appendChild(textarea);
+      form.appendChild(button);
+      form.addEventListener('submit', function (evt) {
+        evt.preventDefault();
+        var note = textarea.value.trim();
+        if (!note || jobsState.pending[job.id]) {
+          if (!note) {
+            announceAlert('Enter a note before saving.');
+            textarea.focus();
+          }
+          return;
+        }
+        jobsState.pending[job.id] = true;
+        renderJobsContainer();
+        google.script.run
+          .withSuccessHandler(function () {
+            delete jobsState.pending[job.id];
+            delete jobsState.histories[job.id];
+            announce('Note saved.');
+            loadJobsQueue(true);
+          })
+          .withFailureHandler(function (err) {
+            delete jobsState.pending[job.id];
+            jobsState.errorMessage = (err && err.message) ? err.message : 'The note could not be saved.';
+            announceAlert(jobsState.errorMessage);
+            renderJobsContainer();
+          })
+          .addJobNote(job.id, note);
+      });
+      return form;
+    }
+
+    function buildJobHistory(job) {
+      var details = document.createElement('details');
+      details.className = 'job-history';
+      var summary = document.createElement('summary');
+      summary.textContent = 'View activity history';
+      details.appendChild(summary);
+      var state = jobsState.histories[job.id];
+      if (state) appendJobHistoryState(details, state);
+      details.addEventListener('toggle', function () {
+        if (details.open && !jobsState.histories[job.id]) loadJobHistory(job.id);
+      });
+      return details;
+    }
+
+    function loadJobHistory(jobId) {
+      jobsState.histories[jobId] = { status: 'loading', data: null, errorMessage: '' };
+      renderJobsContainer();
+      google.script.run
+        .withSuccessHandler(function (result) {
+          if (result && result.status === 'ok') {
+            jobsState.histories[jobId] = { status: 'ok', data: result, errorMessage: '' };
+          } else {
+            jobsState.histories[jobId] = {
+              status: 'error', data: null,
+              errorMessage: (result && result.message) ? result.message : 'Job history is unavailable right now.'
+            };
+          }
+          renderJobsContainer();
+        })
+        .withFailureHandler(function (err) {
+          jobsState.histories[jobId] = {
+            status: 'error', data: null,
+            errorMessage: (err && err.message) ? err.message : 'Job history is unavailable right now.'
+          };
+          renderJobsContainer();
+        })
+        .getJobHistory(jobId);
+    }
+
+    function appendJobHistoryState(details, state) {
+      if (state.status === 'loading') {
+        details.appendChild(buildStateMessage('Loading activity history…', false));
+        return;
+      }
+      if (state.status === 'error') {
+        details.appendChild(buildStateMessage(state.errorMessage, true));
+        return;
+      }
+      if (!state.data.entries.length) {
+        details.appendChild(buildStateMessage('No recorded activity yet.', false));
+        return;
+      }
+      var list = document.createElement('ul');
+      list.className = 'job-history-list';
+      state.data.entries.forEach(function (entry) {
+        var item = document.createElement('li');
+        var action = document.createElement('p');
+        action.textContent = entry.action + ': ' + entry.fromStatus + ' → ' + entry.toStatus;
+        item.appendChild(action);
+        if (entry.note) {
+          var note = document.createElement('p');
+          note.textContent = entry.note;
+          item.appendChild(note);
+        }
+        var time = document.createElement('span');
+        time.className = 'job-history-time';
+        time.textContent = formatDateTimeForDisplay(entry.createdAt);
+        item.appendChild(time);
+        list.appendChild(item);
+      });
+      details.appendChild(list);
+      if (state.data.quarantinedCount > 0) {
+        details.appendChild(buildStateMessage(
+          state.data.quarantinedCount + ' malformed history record(s) were skipped.', true
+        ));
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // Calendar — loaded and rendered fully independently of dashboardState
+    // so a slow or failing Calendar can never block Home or Tasks.
+    // ---------------------------------------------------------------------
+    var calendarState = {
+      status: 'loading', // 'loading' | 'ok' | 'unavailable' | 'failed'
+      events: [],
+      message: ''
+    };
+
+    function loadCalendarEvents() {
+      calendarState.status = 'loading';
+      renderCalendarBody();
+
+      google.script.run
+        .withSuccessHandler(function (result) {
+          if (result && result.status === 'ok') {
+            calendarState.status = 'ok';
+            calendarState.events = result.events || [];
+            calendarState.message = '';
+          } else {
+            calendarState.status = 'unavailable';
+            calendarState.events = [];
+            calendarState.message = (result && result.message) ? result.message : 'Calendar is not available right now.';
+          }
+          renderCalendarBody();
+        })
+        .withFailureHandler(function (err) {
+          calendarState.status = 'failed';
+          calendarState.events = [];
+          calendarState.message = (err && err.message) ? err.message : 'Could not reach the calendar service.';
+          renderCalendarBody();
+        })
+        .getUpcomingEvents();
+    }
+
+    function renderCalendarBody() {
+      var container = calendarBodyEl;
+
+      if (calendarState.status === 'loading') {
+        container.setAttribute('aria-busy', 'true');
+        clearChildren(container);
+        container.appendChild(buildStateMessage('Loading upcoming events…', false));
+        return;
+      }
+
+      container.setAttribute('aria-busy', 'false');
+      clearChildren(container);
+
+      if (calendarState.status === 'failed' || calendarState.status === 'unavailable') {
+        container.appendChild(buildStateMessage(calendarState.message, true));
+        container.appendChild(buildRetryButton(loadCalendarEvents));
+        return;
+      }
+
+      // status === 'ok'
+      if (calendarState.events.length === 0) {
+        container.appendChild(buildStateMessage('No upcoming events in the next 7 days.', false));
+        return;
+      }
+
+      var ul = document.createElement('ul');
+      ul.className = 'events-list';
+      calendarState.events.forEach(function (ev) {
+        ul.appendChild(buildEventListItem(ev));
+      });
+      container.appendChild(ul);
+    }
+
+    function buildEventListItem(ev) {
+      var li = document.createElement('li');
+
+      var titleEl = document.createElement('span');
+      titleEl.className = 'event-title';
+      titleEl.textContent = ev.title;
+      li.appendChild(titleEl);
+
+      var timeEl = document.createElement('span');
+      timeEl.className = 'event-time';
+      timeEl.textContent = ev.allDay
+        ? 'All day · ' + formatIsoDateOnlyForDisplay(ev.start)
+        : formatDateTimeForDisplay(ev.start) + ' – ' + formatDateTimeForDisplay(ev.end);
+      li.appendChild(timeEl);
+
+      return li;
+    }
+
+    // ---------------------------------------------------------------------
+    // Initial load. The Home view is already the visible one per the
+    // static markup, so no switchView() call is needed (and none is made,
+    // to avoid stealing keyboard focus on page load).
+    // ---------------------------------------------------------------------
+    loadDashboardData(false);
+    loadCalendarEvents();
+  })();
+</script>

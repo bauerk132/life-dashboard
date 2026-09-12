@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body { font-family: sans-serif; padding: 2rem; background: #f4f4f9; color: #333; }
+      .card { background: white; padding: 1.5rem; border-radius: 8px; max-width: 500px; margin: 0 auto; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+      .status-box { padding: 1rem; margin-top: 1rem; border-radius: 4px; background: #e3f2fd; word-break: break-all; }
+      .error { background: #ffebee; color: #c62828; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h2>Life Dashboard - Phase 1</h2>
+      <p>Initializing connection...</p>
+      <div id="status-container" class="status-box">Loading server status...</div>
+    </div>
+
+    <script>
+      function escapeHtml(unsafe) {
+        return (unsafe || '').toString()
+             .replace(/&/g, '&amp;')
+             .replace(/</g, '&lt;')
+             .replace(/>/g, '&gt;')
+             .replace(/"/g, '&quot;')
+             .replace(/'/g, '&#039;');
+      }
+
+      function showStatus(message, isError) {
+        const container = document.getElementById('status-container');
+        container.innerHTML = escapeHtml(message);
+        if (isError) container.classList.add('error');
+      }
+
+      google.script.run
+        .withSuccessHandler(function(res) {
+          if (res.status === 'ok') showStatus('✅ ' + res.message);
+          else showStatus('⚠️ ' + res.message, true);
+        })
+        .withFailureHandler(function(err) {
+          showStatus('❌ Error: ' + err.message, true);
+        })
+        .getAppStatus();
+    </script>
+  </body>
+</html>

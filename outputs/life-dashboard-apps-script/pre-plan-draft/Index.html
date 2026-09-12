@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+  <head>
+    <base target="_top">
+    <?!= include('Styles'); ?>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div><p class="eyebrow">PERSONAL OPERATING SYSTEM</p><h1>Life Dashboard</h1></div>
+        <p id="today" class="today"></p>
+      </header>
+      <nav class="tabs" aria-label="Dashboard navigation">
+        <button class="tab active" data-view="home">Home</button>
+        <button class="tab" data-view="jobs">Jobs <span id="readyBadge" class="badge"></span></button>
+        <button class="tab" data-view="tasks">Tasks</button>
+      </nav>
+      <p id="message" class="message" aria-live="polite"></p>
+      <section id="loading" class="loading">Loading your dashboard…</section>
+      <section id="home" class="view hidden"></section>
+      <section id="jobs" class="view hidden"></section>
+      <section id="tasks" class="view hidden"></section>
+    </main>
+    <?!= include('JavaScript'); ?>
+  </body>
+</html>

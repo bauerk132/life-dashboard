@@ -1,0 +1,42 @@
+<script>
+  const state = { data: null, jobFilter: 'all' };
+  const $ = (selector) => document.querySelector(selector);
+  const escapeHtml = (value) => String(value || '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+  const formatMoney = (min, max) => min || max ? `$${Number(min || 0).toLocaleString()}–$${Number(max || 0).toLocaleString()}` : 'Salary not listed';
+  const formatDate = (value) => value ? new Date(value).toLocaleDateString(undefined,{month:'short',day:'numeric'}) : 'No due date';
+  const call = (name, ...args) => new Promise((resolve, reject) => google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[name](...args));
+
+  document.addEventListener('DOMContentLoaded', loadDashboard);
+  async function loadDashboard() {
+    try { state.data = await call('getDashboardData'); render(); }
+    catch (error) { $('#loading').textContent = error.message || 'Could not load dashboard.'; }
+  }
+  function render() {
+    $('#loading').classList.add('hidden'); $('#today').textContent = state.data.today;
+    $('#readyBadge').textContent = state.data.stats.readyJobs;
+    renderHome(); renderJobs(); renderTasks(); showView('home');
+  }
+  function showView(view) {
+    document.querySelectorAll('.view').forEach(el => el.classList.add('hidden'));
+    document.querySelectorAll('.tab').forEach(el => el.classList.toggle('active', el.dataset.view === view));
+    $('#' + view).classList.remove('hidden');
+  }
+  document.querySelectorAll('.tab').forEach(button => button.addEventListener('click', () => showView(button.dataset.view)));
+  function renderHome() {
+    const { stats, tasks, events } = state.data;
+    $('#home').innerHTML = `<div class="grid stats"><article class="card"><div class="label">Open tasks</div><div class="metric">${stats.openTasks}</div></article><article class="card"><div class="label">Completed tasks</div><div class="metric">${stats.completedTasks}</div></article><article class="card"><div class="label">Strong-match jobs</div><div class="metric">${stats.readyJobs}</div></article><article class="card"><div class="label">Applications sent</div><div class="metric">${stats.appliedJobs}</div></article></div><div class="grid two" style="margin-top:16px"><article class="card"><h2 class="section-title">Next up</h2><p class="muted">From your Google Calendar</p>${events.length ? events.map(e => `<div class="row"><span>${escapeHtml(e.title)}</span><span class="muted">${e.allDay ? 'All day' : new Date(e.start).toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit'})}</span></div>`).join('') : '<p class="empty">No calendar events to show. Calendar permission is optional.</p>'}</article><article class="card"><h2 class="section-title">Today’s tasks</h2>${tasks.slice(0,5).map(taskRow).join('') || '<p class="empty">No tasks yet.</p>'}</article></div>`;
+  }
+  function renderJobs() {
+    const jobs = state.data.jobs.filter(job => state.jobFilter === 'all' || (state.jobFilter === 'strong' && Number(job.overall_match) >= 90) || (state.jobFilter === 'remote' && String(job.remote).toLowerCase().includes('remote')) || (state.jobFilter === 'saved' && ['Saved','Ready to Apply'].includes(job.status)));
+    $('#jobs').innerHTML = `<div class="job-toolbar"><h2 class="section-title" style="margin-right:auto">Ready-to-go jobs</h2>${[['all','All'],['strong','90%+ match'],['remote','Remote'],['saved','Saved']].map(([id,label]) => `<button class="filter ${state.jobFilter===id?'active':''}" data-filter="${id}">${label}</button>`).join('')}</div><div class="job-list">${jobs.map(jobCard).join('') || '<article class="card empty">No jobs match this filter.</article>'}</div>`;
+    document.querySelectorAll('[data-filter]').forEach(button => button.addEventListener('click', () => { state.jobFilter = button.dataset.filter; renderJobs(); }));
+    document.querySelectorAll('[data-job-status]').forEach(button => button.addEventListener('click', () => changeJobStatus(button.dataset.id, button.dataset.jobStatus)));
+  }
+  function jobCard(job) { return `<article class="card job-card"><div class="job-head"><div><h3 class="job-title">${escapeHtml(job.title)}</h3><p class="company">${escapeHtml(job.company)} · ${escapeHtml(job.location)}</p></div><div class="score">${escapeHtml(job.overall_match || '—')}<span>MATCH</span></div></div><div class="pills"><span class="pill">${escapeHtml(job.remote || 'Location unknown')}</span><span class="pill">${formatMoney(job.salary_min,job.salary_max)}</span><span class="pill">${escapeHtml(job.recommendation || 'Unscored')}</span><span class="pill">${escapeHtml(job.status)}</span></div><div class="reason"><div><strong>Why it matches</strong>${escapeHtml(job.why_matches || 'Awaiting scoring')}</div><div><strong>Possible gaps</strong>${escapeHtml(job.gaps || 'None identified')}</div></div><div class="actions"><button class="button" data-id="${job.id}" data-job-status="Reviewed">Reviewed</button><button class="button primary" data-id="${job.id}" data-job-status="Saved">Save</button><button class="button" data-id="${job.id}" data-job-status="Ready to Apply">Ready to apply</button>${job.url ? `<a class="button" href="${escapeHtml(job.url)}" target="_blank" rel="noopener">View job</a>` : ''}<button class="button danger" data-id="${job.id}" data-job-status="Rejected">Reject</button></div></article>`; }
+  function renderTasks() { $('#tasks').innerHTML = `<article class="card"><h2 class="section-title">Tasks</h2><p class="muted">Changes save straight to your Tasks sheet.</p><form class="task-form" id="taskForm"><input class="field" name="title" required placeholder="Add a task"><input class="field" name="dueDate" type="date"><select class="field" name="priority"><option>Medium</option><option>High</option><option>Low</option></select><button class="button primary">Add task</button></form><div>${state.data.tasks.map(taskRow).join('') || '<p class="empty">No tasks yet.</p>'}</div></article>`; $('#taskForm').addEventListener('submit', addTask); document.querySelectorAll('[data-task-id]').forEach(button => button.addEventListener('click', () => changeTaskStatus(button.dataset.taskId, button.dataset.taskStatus))); }
+  function taskRow(task) { const done = task.status === 'Done'; return `<div class="row"><div><strong class="${done?'done':''}">${escapeHtml(task.title)}</strong><div class="muted">${formatDate(task.due_date)} · <span class="priority ${escapeHtml(task.priority)}">${escapeHtml(task.priority)}</span></div></div><button class="button" data-task-id="${task.id}" data-task-status="${done?'Open':'Done'}">${done?'Reopen':'Complete'}</button></div>`; }
+  async function addTask(event) { event.preventDefault(); const form = new FormData(event.target); await runAction(() => call('createTask',{title:form.get('title'),dueDate:form.get('dueDate'),priority:form.get('priority')}),'Task added.'); }
+  async function changeTaskStatus(id,status) { await runAction(() => call('setTaskStatus',id,status), status === 'Done' ? 'Task completed.' : 'Task reopened.'); }
+  async function changeJobStatus(id,status) { await runAction(() => call('setJobStatus',id,status), `Job marked ${status}.`); }
+  async function runAction(action, message) { try { await action(); state.data = await call('getDashboardData'); render(); $('#message').textContent = message; } catch(error) { $('#message').textContent = error.message || 'That change could not be saved.'; } }
+</script>

@@ -1,0 +1,21 @@
+# Local-only work and generated dependencies
+/work/
+**/node_modules/
+
+# Apps Script deployment links and local secrets
+**/.clasp.json
+.env
+.env.*
+**/*secret*.json
+**/*credential*.json
+**/client_secret.json
+**/*token*.json
+*.key
+*.pem
+*.p12
+
+# Local databases and editor/system files
+*.db
+*.sqlite
+.DS_Store
+Thumbs.db

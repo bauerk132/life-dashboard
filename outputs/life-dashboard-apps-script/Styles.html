@@ -1,0 +1,587 @@
+<style>
+  :root {
+    --ink: #172033;
+    --muted: #475569;
+    --paper: #f6f8fc;
+    --card: #fff;
+    --line: #dce3ef;
+    --blue: #2563eb;
+    --green: #047857;
+    --red: #b91c1c;
+  }
+
+  * { box-sizing: border-box; }
+
+  [hidden] { display: none !important; }
+
+  body {
+    margin: 0;
+    padding: 24px;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.5;
+  }
+
+  header {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 0 4px;
+  }
+
+  main {
+    max-width: 720px;
+    margin: 0 auto;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 24px;
+  }
+
+  h1 {
+    margin-top: 0;
+    font-size: 1.5rem;
+  }
+
+  h2 {
+    font-size: 1.25rem;
+    margin-top: 0;
+  }
+
+  h3 {
+    font-size: 1.05rem;
+    margin-top: 0;
+  }
+
+  /* h2 is focused programmatically on view switch; outline should still
+     show even though it is not the usual tab-stop shape. */
+  h2:focus-visible,
+  h2:focus {
+    outline: 3px solid var(--blue);
+    outline-offset: 3px;
+    border-radius: 4px;
+  }
+
+  p {
+    color: var(--muted);
+  }
+
+  /* --- Visually-hidden live regions -----------------------------------
+     Stay in the DOM and in the accessibility tree (never display:none) so
+     assistive tech keeps announcing them, but take up no visible space. */
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    border: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+  }
+
+  /* --- Nav --------------------------------------------------------------- */
+  nav {
+    display: flex;
+    gap: 8px;
+    margin: 12px 0 20px;
+    flex-wrap: wrap;
+  }
+
+  .nav-link {
+    font: inherit;
+    font-weight: 600;
+    color: var(--ink);
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 16px;
+    min-height: 44px;
+    cursor: pointer;
+  }
+
+  .nav-link[aria-current="page"] {
+    background: var(--blue);
+    border-color: var(--blue);
+    color: #fff;
+  }
+
+  /* --- Cards --------------------------------------------------------------- */
+  .card {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 16px;
+    margin: 16px 0;
+  }
+
+  #connection-status {
+    font-weight: 600;
+  }
+
+  #connection-status[data-status="ok"] {
+    color: var(--green);
+  }
+
+  #connection-status[data-status="error"] {
+    color: var(--red);
+  }
+
+  /* --- Loading / empty / error state blocks ------------------------------- */
+  .state-message {
+    color: var(--muted);
+    margin: 8px 0;
+  }
+
+  .state-message.is-error {
+    color: var(--red);
+    font-weight: 600;
+  }
+
+  .retry-button {
+    font: inherit;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 8px 14px;
+    min-height: 44px;
+    cursor: pointer;
+    margin-top: 4px;
+  }
+
+  /* --- Stats block --------------------------------------------------------- */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+    margin: 12px 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .stat {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+
+  .stat dt {
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+
+  .stat dd {
+    margin: 4px 0 0;
+    font-size: 1.4rem;
+    font-weight: 700;
+  }
+
+  /* --- Events list ----------------------------------------------------------- */
+  .events-list,
+  .tasks-list {
+    list-style: none;
+    margin: 12px 0 0;
+    padding: 0;
+  }
+
+  .events-list li,
+  .tasks-list li {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+  }
+
+  .event-title {
+    font-weight: 600;
+  }
+
+  .event-time {
+    display: block;
+    color: var(--muted);
+    font-size: 0.9rem;
+    margin-top: 2px;
+  }
+
+  /* --- Task list ------------------------------------------------------------- */
+  .task-item {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .task-info {
+    min-width: 0;
+  }
+
+  .task-title {
+    font-weight: 600;
+    word-break: break-word;
+  }
+
+  .task-meta {
+    display: block;
+    color: var(--muted);
+    font-size: 0.9rem;
+    margin-top: 2px;
+  }
+
+  .task-meta.is-overdue {
+    color: var(--red);
+    font-weight: 600;
+  }
+
+  .task-status-done .task-title {
+    text-decoration: line-through;
+    color: var(--muted);
+  }
+
+  .task-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .task-actions button {
+    font: inherit;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 8px 12px;
+    min-height: 44px;
+    min-width: 44px;
+    cursor: pointer;
+  }
+
+  .task-actions button:disabled,
+  .retry-button:disabled,
+  #add-task-submit:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  /* --- Add-task form ----------------------------------------------------------- */
+  .field {
+    margin-bottom: 14px;
+  }
+
+  .field label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  .field input,
+  .field select {
+    font: inherit;
+    width: 100%;
+    min-height: 44px;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--card);
+    color: var(--ink);
+  }
+
+  #add-task-submit {
+    font: inherit;
+    font-weight: 600;
+    background: var(--blue);
+    color: #fff;
+    border: 1px solid var(--blue);
+    border-radius: 8px;
+    padding: 10px 18px;
+    min-height: 44px;
+    cursor: pointer;
+  }
+
+  /* --- Stored Jobs queue ------------------------------------------------------ */
+  .section-intro {
+    margin-top: -8px;
+  }
+
+  .section-heading-row {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+  }
+
+  .section-heading-row h3 {
+    margin-bottom: 0;
+  }
+
+  .secondary-button,
+  .job-actions button,
+  .job-note-form button {
+    font: inherit;
+    font-weight: 600;
+    min-height: 44px;
+    padding: 8px 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--card);
+    color: var(--ink);
+    cursor: pointer;
+  }
+
+  .jobs-controls {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 18px;
+  }
+
+  .jobs-controls .field {
+    margin-bottom: 0;
+  }
+
+  .jobs-list,
+  .job-history-list {
+    list-style: none;
+    margin: 16px 0 0;
+    padding: 0;
+  }
+
+  .job-card,
+  .job-history-list li {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px;
+    margin-bottom: 12px;
+  }
+
+  .job-card-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .job-card-title {
+    margin: 0;
+    font-size: 1.05rem;
+    overflow-wrap: anywhere;
+  }
+
+  .job-company {
+    margin: 4px 0 0;
+    color: var(--muted);
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+
+  .job-status,
+  .job-freshness {
+    display: inline-block;
+    border-radius: 999px;
+    padding: 3px 8px;
+    font-size: 0.8rem;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+
+  .job-status {
+    background: #dbeafe;
+    color: #1e3a8a;
+  }
+
+  .job-freshness.is-stale,
+  .job-freshness.is-unknown {
+    background: #fef3c7;
+    color: #854d0e;
+  }
+
+  .job-freshness.is-recent {
+    background: #d1fae5;
+    color: #065f46;
+  }
+
+  .job-meta-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px 16px;
+    margin: 16px 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .job-meta-list li {
+    color: var(--muted);
+    font-size: 0.9rem;
+    overflow-wrap: anywhere;
+  }
+
+  .job-meta-list strong {
+    color: var(--ink);
+  }
+
+  .job-source-link {
+    display: inline-block;
+    margin-top: 12px;
+    color: var(--blue);
+    font-weight: 600;
+  }
+
+  .job-explanation {
+    display: grid;
+    gap: 10px;
+    margin-top: 14px;
+    padding: 12px;
+    border-left: 3px solid var(--line);
+    background: #f8fafc;
+  }
+
+  .job-explanation p,
+  .job-notes p,
+  .job-history-list p {
+    margin: 0;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
+
+  .job-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 16px;
+  }
+
+  .job-actions button.is-destructive {
+    border-color: var(--red);
+    color: var(--red);
+  }
+
+  .job-actions button:disabled,
+  .job-note-form button:disabled,
+  .secondary-button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .job-note-form {
+    margin-top: 16px;
+  }
+
+  .job-note-form label {
+    display: block;
+    margin-bottom: 4px;
+    font-weight: 600;
+  }
+
+  .job-note-form textarea {
+    width: 100%;
+    min-height: 88px;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--card);
+    color: var(--ink);
+    font: inherit;
+    resize: vertical;
+  }
+
+  .job-note-form button {
+    margin-top: 8px;
+  }
+
+  .job-history {
+    margin-top: 16px;
+  }
+
+  .job-history summary {
+    color: var(--blue);
+    cursor: pointer;
+    font-weight: 600;
+  }
+
+  .job-history-time {
+    display: block;
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+
+  .job-quarantine {
+    margin-top: 16px;
+    border-left: 3px solid #b45309;
+    padding-left: 12px;
+  }
+
+  /* --- Focus visibility everywhere interactive --------------------------------- */
+  a:focus-visible,
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    outline: 3px solid var(--blue);
+    outline-offset: 2px;
+  }
+
+  /* --- Responsive breakpoints -------------------------------------------------- */
+  @media (max-width: 720px) {
+    body {
+      padding: 16px;
+    }
+
+    main {
+      padding: 18px;
+    }
+
+    .stats-grid {
+      grid-template-columns: 1fr 1fr;
+    }
+  }
+
+  @media (max-width: 430px) {
+    nav {
+      flex-direction: column;
+    }
+
+    .nav-link {
+      width: 100%;
+      text-align: left;
+    }
+
+    .stats-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .task-item {
+      flex-direction: column;
+      align-items: flex-start;
+    }
+
+    .task-actions {
+      width: 100%;
+    }
+
+    .task-actions button {
+      flex: 1 1 auto;
+    }
+
+    .jobs-controls,
+    .job-meta-list {
+      grid-template-columns: 1fr;
+    }
+
+    .job-card-header {
+      flex-direction: column;
+    }
+
+    .job-actions button,
+    .secondary-button {
+      width: 100%;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      animation-duration: 0.001ms !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
+</style>
