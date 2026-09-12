@@ -22,6 +22,8 @@
 !JobFilters.gs
 !JobDedupe.gs
 !Discovery.gs
+!AIProvider_Gemini.gs
+!JobScoring.gs
 !Index.html
 !Styles.html
 !JavaScript.html

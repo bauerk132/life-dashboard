@@ -32,6 +32,24 @@ const SCHEMA = Object.freeze({
   ApplicationHistory: Object.freeze([
     'id', 'application_id', 'job_id', 'action', 'from_status', 'to_status', 'note', 'created_at'
   ]),
+  // Phase 5 Milestone 2. Immutable/versioned score records citing stored job
+  // description and approved profile fields.
+  JobScores: Object.freeze([
+    'id', 'job_id', 'job_description_hash', 'profile_version', 'prompt_version',
+    'schema_version', 'provider', 'model', 'status', 'skills_match',
+    'experience_match', 'education_match', 'location_match', 'salary_match',
+    'overall_match', 'recommendation', 'evidence_json', 'gaps_json',
+    'input_tokens', 'output_tokens', 'estimated_cost', 'currency',
+    'request_id_hash', 'created_at', 'validated_at', 'error_code'
+  ]),
+  // Phase 5 Milestone 2. Append-only cost and token usage ledger for budget
+  // enforcement and accounting.
+  AIUsage: Object.freeze([
+    'id', 'run_id', 'job_id', 'provider', 'model', 'operation',
+    'profile_version', 'prompt_version', 'request_started_at', 'request_finished_at',
+    'input_tokens', 'output_tokens', 'estimated_cost', 'currency', 'status',
+    'error_code'
+  ]),
   // Phase 4B. One row per discovery run (manual or scheduled), keyed on
   // run_id (there is no 'id' column, so primaryKeyField_ falls back to the
   // first field — see that function's comment). Supports checkpoint/resume:
@@ -86,6 +104,15 @@ const PLAIN_TEXT_FIELDS_ = Object.freeze({
   Settings: Object.freeze(['key', 'value']),
   Applications: Object.freeze(['id', 'contact_name', 'contact_email', 'outcome', 'notes']),
   ApplicationHistory: Object.freeze(['id', 'application_id', 'job_id', 'action', 'from_status', 'to_status', 'note']),
+  JobScores: Object.freeze([
+    'id', 'job_id', 'job_description_hash', 'profile_version', 'prompt_version',
+    'schema_version', 'provider', 'model', 'status', 'recommendation',
+    'evidence_json', 'gaps_json', 'currency', 'request_id_hash', 'error_code'
+  ]),
+  AIUsage: Object.freeze([
+    'id', 'run_id', 'job_id', 'provider', 'model', 'operation',
+    'profile_version', 'prompt_version', 'currency', 'status', 'error_code'
+  ]),
   // config_version, pages_attempted and the *_count columns are deliberately
   // EXCLUDED here: they are real numbers (config_version mirrors
   // JOB_PROFILE_.configVersion; the rest are run counters), and Phase 2/3's

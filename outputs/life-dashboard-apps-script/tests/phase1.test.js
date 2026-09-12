@@ -62,9 +62,9 @@ describe('test harness sanity', () => {
     const ctx = loadAppsScriptContext_();
     assert.deepEqual(
       Object.keys(ctx.testExports.SCHEMA).sort(),
-      // ApplicationHistory added in Phase 5 Milestone 1 (Database.gs)
-      // for deterministic application status tracking.
-      ['ApplicationHistory', 'Applications', 'DiscoveryLog', 'DiscoveryRuns', 'JobHistory', 'Jobs', 'Settings', 'Tasks']
+      // ApplicationHistory, AIUsage, and JobScores added in Phase 5
+      // for deterministic application tracking and AI scoring/ledger.
+      ['AIUsage', 'ApplicationHistory', 'Applications', 'DiscoveryLog', 'DiscoveryRuns', 'JobHistory', 'JobScores', 'Jobs', 'Settings', 'Tasks']
     );
     assert.ok(Array.isArray(ctx.testExports.PLAIN_TEXT_FIELDS_.Tasks));
   });

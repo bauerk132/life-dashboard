@@ -29,7 +29,7 @@ const ROOT = path.join(__dirname, '..');
 const DEPLOYED_GS_FILES = [
   'Code.gs', 'Database.gs', 'Tasks.gs', 'Calendar.gs', 'Jobs.gs',
   'JobProfile.gs', 'JobSource_JSearch.gs', 'JobFilters.gs', 'JobDedupe.gs', 'Discovery.gs',
-  'Applications.gs'
+  'Applications.gs', 'AIProvider_Gemini.gs', 'JobScoring.gs'
 ];
 const DEPLOYED_HTML_FILES = ['Index.html', 'Styles.html', 'JavaScript.html'];
 const ALL_DEPLOYED_FILES = ['appsscript.json'].concat(DEPLOYED_GS_FILES, DEPLOYED_HTML_FILES);
@@ -50,6 +50,8 @@ const PUBLIC_ALLOWLIST = [
   // Phase 5 Milestone 1: Applications tracking workflow
   'createApplication', 'setApplicationStatus', 'getApplicationById',
   'getApplicationsByJobId', 'getApplicationHistory', 'updateApplication',
+  // Phase 5 Milestone 2: AI scoring and budget status
+  'scorePendingJobs', 'getScoringBudgetStatus',
   // Phase 4B (Discovery.gs), editor-run administrative actions. Apps
   // Script has no "editor-only" visibility level (see the note above on
   // initializeDatabase), so each is listed honestly rather than pretending
@@ -86,8 +88,8 @@ const BANNED_PATTERNS = [
   // fragile (easy to phrase around) and prone to false positives against
   // this project's own docs and history (several existing project files
   // legitimately discuss Gemini/Codex/Claude by name).
-  { pattern: /UrlFetchApp/, label: 'UrlFetchApp (outbound calls only in the authorized JSearch adapter)', allowedIn: ['JobSource_JSearch.gs'] },
-  { pattern: /fetch\(/, label: 'fetch( (outbound calls only in the authorized JSearch adapter)', allowedIn: ['JobSource_JSearch.gs'] },
+  { pattern: /UrlFetchApp/, label: 'UrlFetchApp (outbound calls only in authorized adapters)', allowedIn: ['JobSource_JSearch.gs', 'AIProvider_Gemini.gs'] },
+  { pattern: /fetch\(/, label: 'fetch( (outbound calls only in authorized adapters)', allowedIn: ['JobSource_JSearch.gs', 'AIProvider_Gemini.gs'] },
   { pattern: /XMLHttpRequest/, label: 'XMLHttpRequest (no outbound network calls of any kind)' },
   // Calendar.gs is documented as read-only (see its own file header); these
   // are unambiguous Calendar *write* methods with no legitimate read-only
@@ -315,7 +317,7 @@ describe('static checks: Phase 3 stored-jobs queue surface', () => {
 });
 
 describe('static checks: Phase 4A network boundary', () => {
-  it('S1: exactly one UrlFetchApp.fetch( occurrence across all deployed files, located in JobSource_JSearch.gs', () => {
+  it('S1: exactly two UrlFetchApp.fetch( occurrences across all deployed files (JobSource_JSearch.gs and AIProvider_Gemini.gs)', () => {
     let totalCount = 0;
     const occurrences = [];
     ALL_DEPLOYED_FILES.forEach((filename) => {
@@ -326,8 +328,9 @@ describe('static checks: Phase 4A network boundary', () => {
         occurrences.push({ filename, count: matches.length });
       }
     });
-    assert.equal(totalCount, 1, `expected exactly 1 UrlFetchApp.fetch( call, found ${totalCount}: ${JSON.stringify(occurrences)}`);
-    assert.equal(occurrences[0].filename, 'JobSource_JSearch.gs');
+    assert.equal(totalCount, 2, `expected exactly 2 UrlFetchApp.fetch( calls, found ${totalCount}: ${JSON.stringify(occurrences)}`);
+    const filenames = occurrences.map((o) => o.filename).sort();
+    assert.deepEqual(filenames, ['AIProvider_Gemini.gs', 'JobSource_JSearch.gs']);
   });
 
   it('S2: adapter only https:// literal is built from JSEARCH_HOST_ and equals jsearch.p.rapidapi.com', () => {
@@ -345,13 +348,18 @@ describe('static checks: Phase 4A network boundary', () => {
     assert.deepEqual(httpsLiterals, ['https://'], 'adapter must not contain any other https:// URL literal');
   });
 
-  it('S3: JSEARCH_RAPIDAPI_KEY appears in no deployed file other than JobSource_JSearch.gs', () => {
+  it('S3: JSEARCH_RAPIDAPI_KEY appears in no deployed file other than JobSource_JSearch.gs, and GEMINI_API_KEY only in AIProvider_Gemini.gs', () => {
     ALL_DEPLOYED_FILES.forEach((filename) => {
-      if (filename === 'JobSource_JSearch.gs') return;
       const content = readDeployed(filename);
-      assert.equal(content.includes('JSEARCH_RAPIDAPI_KEY'), false, `${filename} must not reference JSEARCH_RAPIDAPI_KEY`);
+      if (filename !== 'JobSource_JSearch.gs') {
+        assert.equal(content.includes('JSEARCH_RAPIDAPI_KEY'), false, `${filename} must not reference JSEARCH_RAPIDAPI_KEY`);
+      }
+      if (filename !== 'AIProvider_Gemini.gs') {
+        assert.equal(content.includes('GEMINI_API_KEY'), false, `${filename} must not reference GEMINI_API_KEY`);
+      }
     });
     assert.ok(readDeployed('JobSource_JSearch.gs').includes('JSEARCH_RAPIDAPI_KEY'), 'JobSource_JSearch.gs must reference JSEARCH_RAPIDAPI_KEY');
+    assert.ok(readDeployed('AIProvider_Gemini.gs').includes('GEMINI_API_KEY'), 'AIProvider_Gemini.gs must reference GEMINI_API_KEY');
   });
 
   it('S4: JSearch adapter interface isolation (Discovery.gs allowed to reference public interface, jsearchSendRequest_ strictly private)', () => {
@@ -372,14 +380,10 @@ describe('static checks: Phase 4A network boundary', () => {
   });
 
   it('S5: allowedIn is used by exactly these 4 entries, each naming exactly its documented file', () => {
-    // Rewritten for Phase 4B: this used to assert all allowedIn entries
-    // name only JobSource_JSearch.gs. That is no longer true (the trigger
-    // scope/API are confined to their own files instead), so this now
-    // pins the exact map by label rather than a single shared file name —
-    // stricter than before, not looser.
+    // Rewritten for Phase 5: allows UrlFetchApp in JobSource_JSearch.gs and AIProvider_Gemini.gs
     const expectedAllowedIn = {
-      'UrlFetchApp (outbound calls only in the authorized JSearch adapter)': ['JobSource_JSearch.gs'],
-      'fetch( (outbound calls only in the authorized JSearch adapter)': ['JobSource_JSearch.gs'],
+      'UrlFetchApp (outbound calls only in authorized adapters)': ['JobSource_JSearch.gs', 'AIProvider_Gemini.gs'],
+      'fetch( (outbound calls only in authorized adapters)': ['JobSource_JSearch.gs', 'AIProvider_Gemini.gs'],
       'script.scriptapp scope (manifest-only; added in Phase 4B for the daily discovery trigger)': ['appsscript.json'],
       'ScriptApp (trigger management confined to Discovery.gs)': ['Discovery.gs']
     };
@@ -403,7 +407,7 @@ describe('static checks: Phase 4A network boundary', () => {
     assert.equal(/fetch\(/.test(stripped), false, 'JavaScript.html must not contain fetch(');
   });
 
-  it('S7: .claspignore un-ignores exactly ALL_DEPLOYED_FILES (15 files total)', () => {
+  it('S7: .claspignore un-ignores exactly ALL_DEPLOYED_FILES (17 files total)', () => {
     const claspignore = fs.readFileSync(path.join(ROOT, '.claspignore'), 'utf8');
     const unignored = claspignore
       .split(/\r?\n/)
