@@ -26,7 +26,10 @@ const assert = require('node:assert/strict');
 
 const ROOT = path.join(__dirname, '..');
 
-const DEPLOYED_GS_FILES = ['Code.gs', 'Database.gs', 'Tasks.gs', 'Calendar.gs', 'Jobs.gs'];
+const DEPLOYED_GS_FILES = [
+  'Code.gs', 'Database.gs', 'Tasks.gs', 'Calendar.gs', 'Jobs.gs',
+  'JobProfile.gs', 'JobSource_JSearch.gs', 'JobFilters.gs', 'JobDedupe.gs', 'Discovery.gs'
+];
 const DEPLOYED_HTML_FILES = ['Index.html', 'Styles.html', 'JavaScript.html'];
 const ALL_DEPLOYED_FILES = ['appsscript.json'].concat(DEPLOYED_GS_FILES, DEPLOYED_HTML_FILES);
 
@@ -41,7 +44,8 @@ const ALL_DEPLOYED_FILES = ['appsscript.json'].concat(DEPLOYED_GS_FILES, DEPLOYE
 const PUBLIC_ALLOWLIST = [
   'doGet', 'include', 'getAppStatus', 'initializeDatabase',
   'getDashboardData', 'createTask', 'completeTask', 'reopenTask', 'archiveTask',
-  'getUpcomingEvents', 'getJobsQueue', 'setJobStatus', 'addJobNote', 'getJobHistory'
+  'getUpcomingEvents', 'getJobsQueue', 'setJobStatus', 'addJobNote', 'getJobHistory',
+  'runDiscovery'
 ];
 
 const BANNED_PATTERNS = [
@@ -58,8 +62,8 @@ const BANNED_PATTERNS = [
   // fragile (easy to phrase around) and prone to false positives against
   // this project's own docs and history (several existing project files
   // legitimately discuss Gemini/Codex/Claude by name).
-  { pattern: /UrlFetchApp/, label: 'UrlFetchApp (no outbound network calls of any kind)' },
-  { pattern: /fetch\(/, label: 'fetch( (no outbound network calls of any kind)' },
+  { pattern: /UrlFetchApp/, label: 'UrlFetchApp (outbound calls only in the authorized JSearch adapter)', allowedIn: ['JobSource_JSearch.gs'] },
+  { pattern: /fetch\(/, label: 'fetch( (outbound calls only in the authorized JSearch adapter)', allowedIn: ['JobSource_JSearch.gs'] },
   { pattern: /XMLHttpRequest/, label: 'XMLHttpRequest (no outbound network calls of any kind)' },
   // Calendar.gs is documented as read-only (see its own file header); these
   // are unambiguous Calendar *write* methods with no legitimate read-only
@@ -178,7 +182,8 @@ describe('static checks: appsscript.json', () => {
     assert.equal(manifest.webapp.access, 'MYSELF');
     assert.deepEqual(manifest.oauthScopes, [
       'https://www.googleapis.com/auth/spreadsheets',
-      'https://www.googleapis.com/auth/calendar.readonly'
+      'https://www.googleapis.com/auth/calendar.readonly',
+      'https://www.googleapis.com/auth/script.external_request'
     ]);
     assert.equal(manifest.runtimeVersion, 'V8');
   });
@@ -240,7 +245,8 @@ describe('static checks: include() targets exist', () => {
 
 describe('static checks: banned patterns absent from deployed files', () => {
   ALL_DEPLOYED_FILES.forEach((filename) => {
-    BANNED_PATTERNS.forEach(({ pattern, label }) => {
+    BANNED_PATTERNS.forEach(({ pattern, label, allowedIn }) => {
+      if (allowedIn && allowedIn.indexOf(filename) !== -1) return;
       it(`${filename} does not contain ${label}`, () => {
         const content = stripComments_(readDeployed(filename));
         assert.equal(pattern.test(content), false, `${filename} unexpectedly matched ${pattern} outside of a comment`);
@@ -280,5 +286,87 @@ describe('static checks: Phase 3 stored-jobs queue surface', () => {
     it(`${file} contains ${label}`, () => {
       assert.equal(pattern.test(stripComments_(readDeployed(file))), true, `${file} is missing ${label}`);
     });
+  });
+});
+
+describe('static checks: Phase 4A network boundary', () => {
+  it('S1: exactly one UrlFetchApp.fetch( occurrence across all deployed files, located in JobSource_JSearch.gs', () => {
+    let totalCount = 0;
+    const occurrences = [];
+    ALL_DEPLOYED_FILES.forEach((filename) => {
+      const stripped = stripComments_(readDeployed(filename));
+      const matches = stripped.match(/UrlFetchApp\.fetch\(/g) || [];
+      if (matches.length > 0) {
+        totalCount += matches.length;
+        occurrences.push({ filename, count: matches.length });
+      }
+    });
+    assert.equal(totalCount, 1, `expected exactly 1 UrlFetchApp.fetch( call, found ${totalCount}: ${JSON.stringify(occurrences)}`);
+    assert.equal(occurrences[0].filename, 'JobSource_JSearch.gs');
+  });
+
+  it('S2: adapter only https:// literal is built from JSEARCH_HOST_ and equals jsearch.p.rapidapi.com', () => {
+    const content = stripComments_(readDeployed('JobSource_JSearch.gs'));
+    const hostMatch = content.match(/JSEARCH_HOST_\s*=\s*['"]([^'"]+)['"]/);
+    assert.ok(hostMatch, 'JobSource_JSearch.gs must declare JSEARCH_HOST_');
+    assert.equal(hostMatch[1], 'jsearch.p.rapidapi.com');
+
+    const httpsLiterals = [];
+    const re = /['"](https:\/\/[^'"]*)['"]/g;
+    let m;
+    while ((m = re.exec(content)) !== null) {
+      httpsLiterals.push(m[1]);
+    }
+    assert.deepEqual(httpsLiterals, ['https://'], 'adapter must not contain any other https:// URL literal');
+  });
+
+  it('S3: JSEARCH_RAPIDAPI_KEY appears in no deployed file other than JobSource_JSearch.gs', () => {
+    ALL_DEPLOYED_FILES.forEach((filename) => {
+      if (filename === 'JobSource_JSearch.gs') return;
+      const content = readDeployed(filename);
+      assert.equal(content.includes('JSEARCH_RAPIDAPI_KEY'), false, `${filename} must not reference JSEARCH_RAPIDAPI_KEY`);
+    });
+    assert.ok(readDeployed('JobSource_JSearch.gs').includes('JSEARCH_RAPIDAPI_KEY'), 'JobSource_JSearch.gs must reference JSEARCH_RAPIDAPI_KEY');
+  });
+
+  it('S4: JSearch adapter interface isolation (Discovery.gs allowed to reference public interface, jsearchSendRequest_ strictly private)', () => {
+    const internalTargets = ['jsearchSendRequest_'];
+    const interfaceTargets = ['jsearchFetchPage_', 'jsearchBuildDailyQueries_'];
+    ALL_DEPLOYED_FILES.forEach((filename) => {
+      if (filename === 'JobSource_JSearch.gs') return;
+      const content = readDeployed(filename);
+      internalTargets.forEach((target) => {
+        assert.equal(content.includes(target), false, `${filename} must not reference internal ${target}`);
+      });
+      if (filename !== 'Discovery.gs') {
+        interfaceTargets.forEach((target) => {
+          assert.equal(content.includes(target), false, `${filename} must not reference ${target}`);
+        });
+      }
+    });
+  });
+
+  it('S5: allowedIn is used by exactly the two network entries and names only JobSource_JSearch.gs', () => {
+    const entriesWithAllowedIn = BANNED_PATTERNS.filter((p) => p.allowedIn !== undefined);
+    assert.equal(entriesWithAllowedIn.length, 2, 'expected exactly 2 BANNED_PATTERNS entries with allowedIn');
+    entriesWithAllowedIn.forEach((entry) => {
+      assert.deepEqual(entry.allowedIn, ['JobSource_JSearch.gs']);
+    });
+  });
+
+  it('S6: JavaScript.html contains no fetch(', () => {
+    const stripped = stripComments_(readDeployed('JavaScript.html'));
+    assert.equal(/fetch\(/.test(stripped), false, 'JavaScript.html must not contain fetch(');
+  });
+
+  it('S7: .claspignore un-ignores exactly ALL_DEPLOYED_FILES (14 files total)', () => {
+    const claspignore = fs.readFileSync(path.join(ROOT, '.claspignore'), 'utf8');
+    const unignored = claspignore
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith('!'))
+      .map((l) => l.slice(1).trim());
+    assert.equal(unignored.length, ALL_DEPLOYED_FILES.length, `expected ${ALL_DEPLOYED_FILES.length} unignored files in .claspignore, found ${unignored.length}`);
+    assert.deepEqual(unignored.sort(), ALL_DEPLOYED_FILES.slice().sort());
   });
 });

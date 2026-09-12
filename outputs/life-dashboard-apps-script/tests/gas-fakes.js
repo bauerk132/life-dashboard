@@ -17,6 +17,7 @@
  * the same way here as it would in a real Apps Script project.
  */
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
@@ -177,6 +178,42 @@ function createLockService_(options) {
   };
 }
 
+function createUrlFetchApp_(options) {
+  options = options || {};
+  const responses = (options.responses || []).slice();
+  const calls = [];
+
+  return {
+    calls: calls,
+    fetch: function (url, params) {
+      calls.push({
+        url: url,
+        params: JSON.parse(JSON.stringify(params || {}))
+      });
+
+      if (responses.length === 0) {
+        throw new Error('Fake UrlFetchApp: unexpected network call to ' + url);
+      }
+
+      const next = responses.shift();
+      if (next.throws) {
+        throw (next.throws instanceof Error ? next.throws : new Error(String(next.throws)));
+      }
+
+      const code = (next.code !== undefined) ? next.code : 200;
+      const body = (next.body !== undefined) ? next.body : '';
+      const headers = Object.assign({}, next.headers || {});
+
+      return {
+        getResponseCode: function () { return code; },
+        getContentText: function () { return body; },
+        getHeaders: function () { return Object.assign({}, headers); },
+        getAllHeaders: function () { return Object.assign({}, headers); }
+      };
+    }
+  };
+}
+
 function createUtilities_() {
   let counter = 0;
   return {
@@ -193,7 +230,27 @@ function createUtilities_() {
           day: '2-digit'
         }).format(date);
       }
+      if (pattern === 'yyyy-MM') {
+        return new Intl.DateTimeFormat('en-CA', {
+          timeZone: tz,
+          year: 'numeric',
+          month: '2-digit'
+        }).format(date);
+      }
       return date.toISOString();
+    },
+    computeDigest: function (algorithm, value, charset) {
+      if (algorithm !== 'SHA_256') {
+        throw new Error('Fake Utilities.computeDigest: unsupported algorithm ' + algorithm);
+      }
+      const buf = crypto.createHash('sha256').update(String(value), 'utf8').digest();
+      return Array.from(new Int8Array(buf.buffer, buf.byteOffset, buf.length));
+    },
+    DigestAlgorithm: {
+      SHA_256: 'SHA_256'
+    },
+    Charset: {
+      UTF_8: 'UTF_8'
     }
   };
 }
@@ -379,6 +436,8 @@ function loadAppsScriptContext_(options) {
     return htmlCache[filename];
   }
 
+  const urlFetch = createUrlFetchApp_(options.urlFetch || { responses: [] });
+
   const sandbox = {
     console: consoleFake,
     SpreadsheetApp: {
@@ -390,6 +449,9 @@ function loadAppsScriptContext_(options) {
     PropertiesService: createPropertiesStore_(scriptProperties),
     LockService: createLockService_(options.lockOptions),
     Utilities: createUtilities_(),
+    DigestAlgorithm: { SHA_256: 'SHA_256' },
+    Charset: { UTF_8: 'UTF_8' },
+    UrlFetchApp: urlFetch,
     Session: createSession_(timeZone),
     HtmlService: createHtmlService_(readHtmlFile),
     CalendarApp: createCalendarApp_(options.calendarOptions)
@@ -410,7 +472,14 @@ function loadAppsScriptContext_(options) {
     'globalThis.__TEST_EXPORTS__ = {',
     '  SCHEMA: (typeof SCHEMA !== "undefined") ? SCHEMA : undefined,',
     '  PLAIN_TEXT_FIELDS_: (typeof PLAIN_TEXT_FIELDS_ !== "undefined") ? PLAIN_TEXT_FIELDS_ : undefined,',
-    '  DATE_ONLY_FIELDS_: (typeof DATE_ONLY_FIELDS_ !== "undefined") ? DATE_ONLY_FIELDS_ : undefined',
+    '  DATE_ONLY_FIELDS_: (typeof DATE_ONLY_FIELDS_ !== "undefined") ? DATE_ONLY_FIELDS_ : undefined,',
+    '  JSEARCH_ADAPTER_VERSION_: (typeof JSEARCH_ADAPTER_VERSION_ !== "undefined") ? JSEARCH_ADAPTER_VERSION_ : undefined,',
+    '  JSEARCH_PLAN_MONTHLY_LIMIT_: (typeof JSEARCH_PLAN_MONTHLY_LIMIT_ !== "undefined") ? JSEARCH_PLAN_MONTHLY_LIMIT_ : undefined,',
+    '  JSEARCH_SCHEDULED_DAILY_CAP_: (typeof JSEARCH_SCHEDULED_DAILY_CAP_ !== "undefined") ? JSEARCH_SCHEDULED_DAILY_CAP_ : undefined,',
+    '  JSEARCH_MANUAL_DAILY_CAP_: (typeof JSEARCH_MANUAL_DAILY_CAP_ !== "undefined") ? JSEARCH_MANUAL_DAILY_CAP_ : undefined,',
+    '  JSEARCH_PERIOD_RESERVE_: (typeof JSEARCH_PERIOD_RESERVE_ !== "undefined") ? JSEARCH_PERIOD_RESERVE_ : undefined,',
+    '  JSEARCH_QUERY_CATALOG_: (typeof JSEARCH_QUERY_CATALOG_ !== "undefined") ? JSEARCH_QUERY_CATALOG_ : undefined,',
+    '  JSEARCH_DEFAULT_ENABLED_PUBLISHERS_: (typeof JSEARCH_DEFAULT_ENABLED_PUBLISHERS_ !== "undefined") ? JSEARCH_DEFAULT_ENABLED_PUBLISHERS_ : undefined',
     '};'
   ].join('\n');
 
@@ -434,7 +503,8 @@ function loadAppsScriptContext_(options) {
     spreadsheet: spreadsheet,
     sheetsByName: sheetsByName,
     consoleFake: consoleFake,
-    testExports: testExports
+    testExports: testExports,
+    urlFetch: urlFetch
   };
 }
 
@@ -443,5 +513,6 @@ module.exports = {
   loadAppsScriptContext_: loadAppsScriptContext_,
   createSheet_: createSheet_,
   hostify_: hostify_,
-  createCalendarApp_: createCalendarApp_
+  createCalendarApp_: createCalendarApp_,
+  createUrlFetchApp_: createUrlFetchApp_
 };

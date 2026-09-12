@@ -16,6 +16,11 @@
 !Tasks.gs
 !Calendar.gs
 !Jobs.gs
+!JobProfile.gs
+!JobSource_JSearch.gs
+!JobFilters.gs
+!JobDedupe.gs
+!Discovery.gs
 !Index.html
 !Styles.html
 !JavaScript.html
