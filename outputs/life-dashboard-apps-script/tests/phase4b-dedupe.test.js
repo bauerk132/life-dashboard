@@ -161,6 +161,17 @@ describe('Phase 4B JobDedupe: L1 (source, external_id)', () => {
     assert.equal(Object.prototype.hasOwnProperty.call(record, 'id'), false, 'INSERT record must not set id — Database.gs auto-generates it');
   });
 
+  it('INSERT stores remote: true when candidate.remote has adapter shape {value: true, label: "Remote"}', () => {
+    const ctx = createContext_();
+    const index = createFakeIndex_(ctx.sandbox, []);
+    const candidate = baseCandidate_({ remote: { value: true, label: 'Remote' } });
+
+    const result = ctx.sandbox.jobDedupeResolveCandidate_(index, candidate, NOW_ISO);
+
+    assert.equal(result.action, 'INSERT');
+    assert.equal(result.record.remote, true);
+  });
+
   it('>1 match -> QUARANTINE AMBIGUOUS_MULTI_MATCH', () => {
     const ctx = createContext_();
     const rowA = jobsRow_({ id: 'row-A', external_id: 'ext-100' });
