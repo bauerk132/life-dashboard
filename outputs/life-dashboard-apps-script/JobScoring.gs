@@ -9,6 +9,15 @@
  *
  * Normal browsing produces 0 AI calls and $0 cost. Unchanged jobs are never
  * rescored (SHA-256 cache identity deduplication).
+ *
+ * Residual-correction pass (Phase 5 Milestone 2, 2026-09-13): replaces the
+ * duplicated, orphan-prone budget aggregation in checkAndReserveMonthlyBudgetInDb_
+ * and getScoringBudgetStatus with a single shared aggregateLedgerForPeriod_,
+ * corrects the reservation sizing formula, rewrites validateScoringOutput_
+ * to a strict reject-don't-coerce schema plus evidence grounding, and
+ * reorders scoreSingleJobInDb_ so a reservation is only ever created after
+ * every guaranteed pre-dispatch failure mode has been ruled out. See
+ * CLAUDE_RESIDUAL_CORRECTION_REVIEW_RETURN.md sections 5, 7 and 8.
  */
 
 const SCORING_SCHEMA_VERSION_ = '1.0.0';
@@ -16,17 +25,54 @@ const PROMPT_VERSION_ = '1.0.0';
 const MONTHLY_BUDGET_CEILING_USD_ = 1.00;
 const MAX_CANDIDATES_PER_RUN_ = 10;
 
-// FIXED R4: Update Gemini 2.5 Flash constants to correct public rates
 const GEMINI_INPUT_COST_PER_MILLION_USD_ = 0.30;
 const GEMINI_OUTPUT_COST_PER_MILLION_USD_ = 2.50;
-const WORST_CASE_RESERVATION_COST_USD_ = 0.006; // >= max size (2048 output tokens)
+
+// Integer 1e-5 USD "units" are used for all ledger arithmetic to avoid
+// floating-point drift at the exact boundary of the monthly ceiling.
+const MONETARY_UNITS_PER_USD_ = 100000;
+
+// Reservation sized to the worst case a single scoring attempt can ever
+// legitimately cost: the maximum input tokens accepted (Section 7's
+// pre-dispatch input limit) plus the maximum output tokens the model is
+// configured to produce (GEMINI_MAX_OUTPUT_TOKENS_, also used as
+// generationConfig.maxOutputTokens in AIProvider_Gemini.gs). Computed in
+// integer units first (rounding each rate to whole 1e-5-USD-per-token
+// before multiplying) so the result is exact rather than reconstructed
+// from an intermediate float division.
+const SCORING_RESERVATION_COST_UNITS_ = Math.ceil(
+  (GEMINI_MAX_INPUT_TOKENS_ * Math.round(GEMINI_INPUT_COST_PER_MILLION_USD_ * MONETARY_UNITS_PER_USD_) +
+   GEMINI_MAX_OUTPUT_TOKENS_ * Math.round(GEMINI_OUTPUT_COST_PER_MILLION_USD_ * MONETARY_UNITS_PER_USD_)) / 1000000
+);
+const SCORING_RESERVATION_COST_USD_ = SCORING_RESERVATION_COST_UNITS_ / MONETARY_UNITS_PER_USD_;
 
 const SCORING_RECOMMENDATIONS_ = Object.freeze([
   'Strong Match', 'Possible Match', 'Not a Match'
 ]);
+const SCORING_ALLOWED_KEYS_ = Object.freeze([
+  'skills_match', 'experience_match', 'education_match', 'location_match',
+  'salary_match', 'overall_match', 'recommendation', 'evidence', 'gaps'
+]);
+const SCORING_NUMERIC_FIELDS_ = Object.freeze([
+  'skills_match', 'experience_match', 'education_match', 'location_match', 'salary_match', 'overall_match'
+]);
+const SCORING_FORBIDDEN_LEADING_CHARS_ = Object.freeze(['=', '+', '-', '@', '\t', '\r']);
+const SCORING_MIN_EVIDENCE_WORD_TOKENS_ = 3;
+const SCORING_MIN_EVIDENCE_CHARS_ = 20;
+const SCORING_TRUNCATION_MARKER_ = '... [TRUNCATED]';
+
 const MAX_EVIDENCE_ITEMS_ = 10;
 const MAX_GAP_ITEMS_ = 10;
 const MAX_ITEM_LENGTH_ = 500;
+
+// Run-stopping failure codes (Section 6): once one of these is thrown for
+// a candidate, scorePendingJobs must not attempt any further candidate in
+// the same run. This bounds the number of possible conservative charges
+// per run to at most one per code family.
+const SCORING_RUN_STOPPING_CODES_ = Object.freeze([
+  'AUTH_ERROR', 'RATE_LIMIT', 'TIMEOUT', 'NETWORK_ERROR', 'PROVIDER_UNAVAILABLE',
+  'USAGE_BOUND_EXCEEDED', 'TOKEN_COUNT_UNAVAILABLE', 'BUDGET_EXCEEDED', 'LEDGER_INTEGRITY_BLOCKED'
+]);
 
 /**
  * FIXED F10: Gets America/New_York "yyyy-MM" budget period identifier
@@ -84,11 +130,11 @@ function computeScoringCacheKey_(descHash, profileVersion, promptVersion, schema
 function sanitizeJobDescriptionForPrompt_(description) {
   if (!description || typeof description !== 'string') return '';
   let cleaned = description.replace(/<[^>]*>/g, ' ');
-  cleaned = cleaned.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+.[A-Za-z]{2,}/g, '[REDACTED_EMAIL]');
+  cleaned = cleaned.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[REDACTED_EMAIL]');
   cleaned = cleaned.replace(/https?:\/\/[^\s]+/g, '[REDACTED_URL]');
   cleaned = cleaned.replace(/\s+/g, ' ').trim();
   if (cleaned.length > 8000) {
-    cleaned = cleaned.slice(0, 8000) + '... [TRUNCATED]';
+    cleaned = cleaned.slice(0, 8000) + SCORING_TRUNCATION_MARKER_;
   }
   return cleaned;
 }
@@ -166,6 +212,139 @@ function calculateCostUsd_(inputTokens, outputTokens) {
 }
 
 /**
+ * Converts a USD amount to integer 1e-5 USD units.
+ */
+function usdToMonetaryUnits_(usd) {
+  return Math.round(usd * MONETARY_UNITS_PER_USD_);
+}
+
+/**
+ * Resolves the budget period an AIUsage row is attributed to. An invalid
+ * or missing request_started_at is attributed to targetYearMonth itself —
+ * both call sites always aggregate for "now", so this keeps a bad-date row
+ * from silently vanishing from the very period being checked (Section 5).
+ */
+function ledgerRowPeriod_(row, targetYearMonth) {
+  if (!row.request_started_at) return targetYearMonth;
+  const d = new Date(row.request_started_at);
+  if (isNaN(d.getTime())) return targetYearMonth;
+  return getNewYorkYearMonth_(d);
+}
+
+/**
+ * Validates and converts a ledger row's estimated_cost to integer units.
+ * Malformed, negative, non-finite, or empty cost is fail-closed: the
+ * caller substitutes SCORING_RESERVATION_COST_UNITS_ (Section 5's
+ * "reservation constant for reporting") and blocks dispatch — this
+ * guarantees spend is never understated by bad data.
+ */
+function ledgerRowCostUnits_(row) {
+  const raw = row.estimated_cost;
+  const num = (typeof raw === 'number') ? raw : parseFloat(raw);
+  if (!Number.isFinite(num) || num < 0) {
+    return { units: null, invalid: true };
+  }
+  return { units: usdToMonetaryUnits_(num), invalid: false };
+}
+
+/**
+ * Shared budget-ledger aggregator used by both checkAndReserveMonthlyBudgetInDb_
+ * and getScoringBudgetStatus (Section 5). Pairs reservation ('score_job')
+ * and reconcile rows by run_id+job_id across ALL periods (not just
+ * targetYearMonth), then attributes cost to whichever period the counted
+ * row(s) actually belong to:
+ *
+ *   - Exactly one reservation + one reconcile for a run_id/job_id pair:
+ *     count only the reconcile's cost, in the reconcile row's own period
+ *     (status is irrelevant — Failed counts the same as Completed).
+ *   - Exactly one reservation, no reconcile: count the reservation's cost
+ *     in its own period (an unresolved/in-flight reservation).
+ *   - Zero reservations, one reconcile: an orphan reconcile — counts in
+ *     its own period.
+ *   - More than one reservation or more than one reconcile for the same
+ *     pairing key, or any row with an unrecognized operation: sum EVERY
+ *     row in that group rather than guess which one is authoritative —
+ *     this can only overstate, never understate, and is flagged via the
+ *     returned `anomaly` field.
+ *
+ * A row whose operation is 'reconcile' and whose error_code is
+ * 'USAGE_BOUND_EXCEEDED' blocks ALL future dispatch, in any period,
+ * forever (Section 5/6) — reflected in the returned `blocked` field.
+ *
+ * @returns {{spendUnits:number, totalCallsThisMonth:number, blocked:boolean, blockReason:string, anomaly:boolean}}
+ */
+function aggregateLedgerForPeriod_(rows, targetYearMonth) {
+  const groups = {};
+  let blocked = false;
+  let blockReason = '';
+  let anomaly = false;
+
+  rows.forEach(function (row) {
+    if (row.operation === 'reconcile' && row.error_code === 'USAGE_BOUND_EXCEEDED') {
+      blocked = true;
+      blockReason = blockReason || 'USAGE_BOUND_EXCEEDED';
+    }
+    const key = String(row.run_id) + '::' + String(row.job_id);
+    if (!groups[key]) groups[key] = { reservations: [], reconciles: [], other: [] };
+    if (row.operation === 'score_job') groups[key].reservations.push(row);
+    else if (row.operation === 'reconcile') groups[key].reconciles.push(row);
+    else groups[key].other.push(row);
+  });
+
+  let spendUnits = 0;
+  let reservationCallsInPeriod = 0;
+  let orphanReconcileCallsInPeriod = 0;
+
+  Object.keys(groups).forEach(function (key) {
+    const g = groups[key];
+    const k = g.reservations.length;
+    const m = g.reconciles.length;
+    const otherCount = g.other.length;
+
+    let countedRows;
+    if (k > 1 || m > 1 || otherCount > 0) {
+      countedRows = g.reservations.concat(g.reconciles, g.other);
+      anomaly = true;
+    } else if (m === 1) {
+      countedRows = g.reconciles;
+    } else if (k === 1) {
+      countedRows = g.reservations;
+    } else {
+      countedRows = [];
+    }
+
+    countedRows.forEach(function (row) {
+      if (ledgerRowPeriod_(row, targetYearMonth) !== targetYearMonth) return;
+      const cost = ledgerRowCostUnits_(row);
+      if (cost.invalid) {
+        blocked = true;
+        blockReason = blockReason || 'INVALID_LEDGER_DATA';
+        spendUnits += SCORING_RESERVATION_COST_UNITS_;
+      } else {
+        spendUnits += cost.units;
+      }
+    });
+
+    g.reservations.forEach(function (row) {
+      if (ledgerRowPeriod_(row, targetYearMonth) === targetYearMonth) reservationCallsInPeriod++;
+    });
+    if (k === 0) {
+      g.reconciles.forEach(function (row) {
+        if (ledgerRowPeriod_(row, targetYearMonth) === targetYearMonth) orphanReconcileCallsInPeriod++;
+      });
+    }
+  });
+
+  return {
+    spendUnits: spendUnits,
+    totalCallsThisMonth: reservationCallsInPeriod + orphanReconcileCallsInPeriod,
+    blocked: blocked,
+    blockReason: blockReason,
+    anomaly: anomaly
+  };
+}
+
+/**
  * Checks current calendar month usage in AIUsage sheet against the $1.00 USD ceiling.
  * Reserves capacity before any provider network call.
  */
@@ -173,31 +352,19 @@ function checkAndReserveMonthlyBudgetInDb_(ss, jobId, runId, profileVersion) {
   const usageRows = readRows_(ss, 'AIUsage');
   const now = new Date();
   const currentYM = getNewYorkYearMonth_(now);
+  const agg = aggregateLedgerForPeriod_(usageRows, currentYM);
 
-  let currentSpend = 0;
-  usageRows.forEach(function (r) {
-    if (!r.request_started_at) return;
-    const reqDate = new Date(r.request_started_at);
-    if (isNaN(reqDate.getTime())) return;
-    if (getNewYorkYearMonth_(reqDate) === currentYM) {
-      // Sum all completed items or unresolved reservations
-      if (r.status === 'Completed' && r.operation === 'reconcile') {
-        const cost = typeof r.estimated_cost === 'number' ? r.estimated_cost : parseFloat(r.estimated_cost);
-        if (!isNaN(cost)) currentSpend += cost;
-      } else if (r.status === 'Reserved') {
-        // Also check if this reservation was reconciled later
-        const reconciled = usageRows.some(row => row.run_id === r.run_id && row.job_id === r.job_id && row.operation === 'reconcile');
-        if (!reconciled) {
-          const cost = typeof r.estimated_cost === 'number' ? r.estimated_cost : parseFloat(r.estimated_cost);
-          if (!isNaN(cost)) currentSpend += cost;
-        }
-      }
-    }
-  });
-
-  if (currentSpend + WORST_CASE_RESERVATION_COST_USD_ > MONTHLY_BUDGET_CEILING_USD_) {
+  if (agg.blocked) {
     throw UserError_(
-      'Monthly AI budget ceiling of $' + MONTHLY_BUDGET_CEILING_USD_.toFixed(2) + ' USD reached. Current spend: $' + currentSpend.toFixed(4),
+      'AI usage ledger integrity check failed; dispatch is blocked pending review (' + agg.blockReason + ').',
+      'LEDGER_INTEGRITY_BLOCKED'
+    );
+  }
+
+  const ceilingUnits = usdToMonetaryUnits_(MONTHLY_BUDGET_CEILING_USD_);
+  if (agg.spendUnits + SCORING_RESERVATION_COST_UNITS_ > ceilingUnits) {
+    throw UserError_(
+      'Monthly AI budget ceiling of $' + MONTHLY_BUDGET_CEILING_USD_.toFixed(2) + ' USD reached. Current spend: $' + (agg.spendUnits / MONETARY_UNITS_PER_USD_).toFixed(5),
       'BUDGET_EXCEEDED'
     );
   }
@@ -214,7 +381,7 @@ function checkAndReserveMonthlyBudgetInDb_(ss, jobId, runId, profileVersion) {
     request_finished_at: '',
     input_tokens: 0,
     output_tokens: 0,
-    estimated_cost: WORST_CASE_RESERVATION_COST_USD_,
+    estimated_cost: SCORING_RESERVATION_COST_USD_,
     currency: 'USD',
     status: 'Reserved',
     error_code: ''
@@ -227,6 +394,14 @@ function checkAndReserveMonthlyBudgetInDb_(ss, jobId, runId, profileVersion) {
 /**
  * Reconciles the reservation record by APPENDING a new row with operation 'reconcile'
  * instead of mutating. (FIXED F9)
+ *
+ * The caller is responsible for passing the correct token counts for the
+ * outcome: actual charged tokens when usage was validated, or the
+ * conservative worst-case tokens (GEMINI_MAX_INPUT_TOKENS_ /
+ * GEMINI_MAX_OUTPUT_TOKENS_) when it was not — see Section 6/7. Those
+ * conservative tokens cost exactly SCORING_RESERVATION_COST_USD_, so a
+ * conservative reconcile can never exceed the reservation already made
+ * for this attempt.
  */
 function reconcileUsageInDb_(ss, reservationId, inputTokens, outputTokens, status, errorCode) {
   const actualCost = calculateCostUsd_(inputTokens, outputTokens);
@@ -236,7 +411,7 @@ function reconcileUsageInDb_(ss, reservationId, inputTokens, outputTokens, statu
 
   // Append new row mapping back to the same run/job ID but marking 'reconcile'
   return appendRecordInDb_(ss, 'AIUsage', {
-        run_id: res.run_id,
+    run_id: res.run_id,
     job_id: res.job_id,
     provider: res.provider,
     model: res.model,
@@ -255,32 +430,83 @@ function reconcileUsageInDb_(ss, reservationId, inputTokens, outputTokens, statu
 }
 
 /**
- * Validates the model output against scoring rules and quarantine policies.
- * FIXED R1: Reject unknown keys, validate evidence grounding.
- * FIXED R2: Deterministic score calculation.
+ * Normalizes text for evidence-grounding comparison (Section 8): NFKC,
+ * typographic quotes/dashes to ASCII, lowercase, collapse whitespace, trim.
+ * Both the evidence item and the corpus must go through this identically.
  */
-function validateScoringOutput_(parsed, rawDescription) {
-  if (!parsed || typeof parsed !== 'object') {
+function normalizeForGrounding_(text) {
+  let s = String(text).normalize('NFKC');
+  s = s.replace(/[‘’‛′]/g, "'");
+  s = s.replace(/[“”‟″]/g, '"');
+  s = s.replace(/[–—−]/g, '-');
+  s = s.toLowerCase();
+  s = s.replace(/\s+/g, ' ').trim();
+  return s;
+}
+
+/**
+ * True if `item` occurs as an exact substring of `corpus` at a word
+ * boundary on both sides (the adjacent character, if any, must not be a
+ * letter or digit). Both strings must already be normalized identically.
+ */
+function isGroundedInCorpus_(item, corpus) {
+  if (item.length === 0) return false;
+  const isWordChar = function (ch) { return ch !== '' && /[\p{L}\p{N}]/u.test(ch); };
+  let searchFrom = 0;
+  for (;;) {
+    const idx = corpus.indexOf(item, searchFrom);
+    if (idx === -1) return false;
+    const before = idx > 0 ? corpus[idx - 1] : '';
+    const afterIdx = idx + item.length;
+    const after = afterIdx < corpus.length ? corpus[afterIdx] : '';
+    if (!isWordChar(before) && !isWordChar(after)) return true;
+    searchFrom = idx + 1;
+  }
+}
+
+/**
+ * Validates a single evidence/gap array element's shape: must be a string
+ * with no C0/C1/format/surrogate control characters (checked before
+ * trimming), and trimmed length 1-500. Returns the trimmed string, or
+ * null if the shape is invalid. No truncation is ever performed.
+ */
+function validateScoringItemShape_(item) {
+  if (typeof item !== 'string') return null;
+  if (/[\p{Cc}\p{Cf}\p{Cs}]/u.test(item)) return null;
+  const trimmed = item.trim();
+  if (trimmed.length < 1 || trimmed.length > MAX_ITEM_LENGTH_) return null;
+  return trimmed;
+}
+
+/**
+ * Validates the model output against the scoring schema and evidence-
+ * grounding rules (Section 8). Rejects rather than coerces, truncates,
+ * stringifies, or silently defaults any malformed value.
+ *
+ * @param {*} parsed - The model's parsed JSON output.
+ * @param {string} groundingDescription - The sanitized job description
+ *   text (sanitizeJobDescriptionForPrompt_(job.description)) that every
+ *   evidence item must be traceable to. Gaps are not grounded.
+ * @returns {{valid:true, data:Object}|{valid:false, errorCode:string}}
+ */
+function validateScoringOutput_(parsed, groundingDescription) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return { valid: false, errorCode: 'INVALID_OBJECT' };
   }
 
-  // FIXED R1: Check for unknown fields
-  const allowedKeys = ['skills_match', 'experience_match', 'education_match', 'location_match', 'salary_match', 'overall_match', 'recommendation', 'evidence', 'gaps'];
-  for (let k in parsed) {
-    if (allowedKeys.indexOf(k) === -1) {
-      return { valid: false, errorCode: 'UNKNOWN_FIELD' };
-    }
+  const presentKeys = Object.keys(parsed);
+  const unknown = presentKeys.filter(function (k) { return SCORING_ALLOWED_KEYS_.indexOf(k) === -1; });
+  if (unknown.length > 0) {
+    return { valid: false, errorCode: 'UNKNOWN_FIELD' };
+  }
+  const missing = SCORING_ALLOWED_KEYS_.filter(function (k) { return presentKeys.indexOf(k) === -1; });
+  if (missing.length > 0) {
+    return { valid: false, errorCode: 'MISSING_FIELD' };
   }
 
-  const numericFields = [
-    'skills_match', 'experience_match', 'education_match',
-    'location_match', 'salary_match', 'overall_match'
-  ];
-
-  for (let i = 0; i < numericFields.length; i++) {
-    const field = numericFields[i];
-    const val = parsed[field];
-    if (typeof val !== 'number' || isNaN(val) || !isFinite(val) || val < 0 || val > 100) {
+  for (let i = 0; i < SCORING_NUMERIC_FIELDS_.length; i++) {
+    const val = parsed[SCORING_NUMERIC_FIELDS_[i]];
+    if (typeof val !== 'number' || !Number.isInteger(val) || val < 0 || val > 100) {
       return { valid: false, errorCode: 'INVALID_SCORE_RANGE' };
     }
   }
@@ -289,8 +515,54 @@ function validateScoringOutput_(parsed, rawDescription) {
     return { valid: false, errorCode: 'INVALID_RECOMMENDATION' };
   }
 
-  // FIXED R2: Deterministic score computation
-  // Weighted: Skills 35%, Experience 25%, Education 10%, Location 15%, Salary 15%
+  if (!Array.isArray(parsed.evidence) || parsed.evidence.length < 1 || parsed.evidence.length > MAX_EVIDENCE_ITEMS_) {
+    return { valid: false, errorCode: 'INVALID_EVIDENCE' };
+  }
+  if (!Array.isArray(parsed.gaps) || parsed.gaps.length > MAX_GAP_ITEMS_) {
+    return { valid: false, errorCode: 'INVALID_GAPS' };
+  }
+
+  const evidenceItems = [];
+  for (let i = 0; i < parsed.evidence.length; i++) {
+    const shaped = validateScoringItemShape_(parsed.evidence[i]);
+    if (shaped === null) return { valid: false, errorCode: 'INVALID_EVIDENCE' };
+    evidenceItems.push(shaped);
+  }
+
+  const gapItems = [];
+  for (let i = 0; i < parsed.gaps.length; i++) {
+    const shaped = validateScoringItemShape_(parsed.gaps[i]);
+    if (shaped === null) return { valid: false, errorCode: 'INVALID_GAPS' };
+    if (SCORING_FORBIDDEN_LEADING_CHARS_.indexOf(shaped.charAt(0)) !== -1) {
+      return { valid: false, errorCode: 'INVALID_GAPS' };
+    }
+    gapItems.push(shaped);
+  }
+
+  let corpusSource = typeof groundingDescription === 'string' ? groundingDescription : '';
+  if (corpusSource.slice(-SCORING_TRUNCATION_MARKER_.length) === SCORING_TRUNCATION_MARKER_) {
+    corpusSource = corpusSource.slice(0, -SCORING_TRUNCATION_MARKER_.length);
+  }
+  const normalizedCorpus = normalizeForGrounding_(corpusSource);
+
+  for (let i = 0; i < evidenceItems.length; i++) {
+    const normalizedItem = normalizeForGrounding_(evidenceItems[i]);
+    const startsWithWordChar = /^[\p{L}\p{N}]/u.test(normalizedItem);
+    const endsWithWordChar = /[\p{L}\p{N}]$/u.test(normalizedItem);
+    const wordTokens = normalizedItem.match(/[\p{L}\p{N}]+/gu) || [];
+    if (!startsWithWordChar || !endsWithWordChar ||
+        wordTokens.length < SCORING_MIN_EVIDENCE_WORD_TOKENS_ ||
+        normalizedItem.length < SCORING_MIN_EVIDENCE_CHARS_) {
+      return { valid: false, errorCode: 'EVIDENCE_TOO_SHORT' };
+    }
+    if (!isGroundedInCorpus_(normalizedItem, normalizedCorpus)) {
+      return { valid: false, errorCode: 'EVIDENCE_UNSUPPORTED' };
+    }
+  }
+
+  // FIXED R2: Deterministic score computation, weighted per the official
+  // rubric. The model's own `recommendation` and `overall_match` strings
+  // are validated for shape only above — never trusted as authoritative.
   const computedOverall = Math.round(
     parsed.skills_match * 0.35 +
     parsed.experience_match * 0.25 +
@@ -298,54 +570,41 @@ function validateScoringOutput_(parsed, rawDescription) {
     parsed.location_match * 0.15 +
     parsed.salary_match * 0.15
   );
-
-  const finalOverall = computedOverall; // Hard override.
   let derivedRecommendation = 'Not a Match';
   if (computedOverall >= 80) derivedRecommendation = 'Strong Match';
   else if (computedOverall >= 60) derivedRecommendation = 'Possible Match';
 
-  // FIXED R1: Grounding check
-  const descWords = (rawDescription || '').toLowerCase().match(/\b\w+\b/g) || [];
-  const descWordSet = {};
-  for(let w of descWords) if(w.length > 3) descWordSet[w] = true;
-
-  const validateGrounding = (items) => {
-    return (Array.isArray(items) ? items : []).slice(0, MAX_EVIDENCE_ITEMS_).map(item => {
-      const itemStr = String(item).slice(0, MAX_ITEM_LENGTH_).trim();
-      const itemWords = itemStr.toLowerCase().match(/\b\w+\b/g) || [];
-      let grounded = false;
-      for (let w of itemWords) {
-        if (w.length > 3 && descWordSet[w]) {
-          grounded = true;
-          break;
-        }
-      }
-      return escapeSheetFormula_(!grounded ? `[UNGROUNDED] ${itemStr}` : itemStr);
-    });
-  };
-
-  const sanitizedEvidence = validateGrounding(parsed.evidence);
-  const sanitizedGaps = validateGrounding(parsed.gaps);
-
   return {
     valid: true,
     data: {
-      skills_match: Math.round(parsed.skills_match),
-      experience_match: Math.round(parsed.experience_match),
-      education_match: Math.round(parsed.education_match),
-      location_match: Math.round(parsed.location_match),
-      salary_match: Math.round(parsed.salary_match),
-      model_overall_match: parsed.overall_match, // Stored for diagnostic purposes
-      overall_match: finalOverall,
-      recommendation: derivedRecommendation, // Derived deterministically
-      evidence: sanitizedEvidence,
-      gaps: sanitizedGaps
+      skills_match: parsed.skills_match,
+      experience_match: parsed.experience_match,
+      education_match: parsed.education_match,
+      location_match: parsed.location_match,
+      salary_match: parsed.salary_match,
+      model_overall_match: parsed.overall_match,
+      overall_match: computedOverall,
+      recommendation: derivedRecommendation,
+      // escapeSheetFormula_ is retained at write time as defense-in-depth
+      // only; every item that reaches it here has already been proven not
+      // to begin with a formula-trigger character, so it is the identity
+      // function in practice (Section 8).
+      evidence: evidenceItems.map(function (e) { return escapeSheetFormula_(e); }),
+      gaps: gapItems.map(function (g) { return escapeSheetFormula_(g); })
     }
   };
 }
 
 /**
  * Scores a single job candidate within an isolated database transaction.
+ *
+ * Corrected sequence (Section 7): cache check -> read-only budget
+ * pre-check -> format prompt -> prepare (countTokens) -> reserve ->
+ * dispatch (generateContent) -> exactly one reconcile -> validate/publish
+ * or quarantine. Reservation only happens after every guaranteed
+ * pre-dispatch failure mode has already been ruled out, so a reservation
+ * can no longer be orphaned by a later INVALID_PROFILE/INPUT_TOO_LARGE/
+ * TOKEN_COUNT_UNAVAILABLE failure.
  *
  * @param {Spreadsheet} ss - Active spreadsheet handle.
  * @param {Object} job - Job record from Jobs sheet.
@@ -357,7 +616,7 @@ function scoreSingleJobInDb_(ss, job, runId) {
   const profileVersion = (profile && profile.configVersion) ? profile.configVersion.toString() : '1.0.0';
   const descHash = computeJobDescriptionHash_(job.description);
 
-  // FIXED R5: Check cache identity properly (all components)
+  // Step 1: cache check (unchanged — existing 7-field match).
   const existingScores = readRows_(ss, 'JobScores').filter(function (s) {
     return s.job_id === job.id &&
       s.job_description_hash === descHash &&
@@ -386,31 +645,58 @@ function scoreSingleJobInDb_(ss, job, runId) {
     return { status: 'cached', scoreId: cached.id };
   }
 
-  const reservationId = checkAndReserveMonthlyBudgetInDb_(ss, job.id, runId, profileVersion);
-
-  const promptText = formatScoringPrompt_(job, profile);
-  let providerResult;
-  let callError = null;
-
-  try {
-    providerResult = geminiCallScoringEndpoint_(promptText);
-  } catch (err) {
-    callError = err;
+  // Step 2: read-only budget pre-check. If blocked, zero network calls and
+  // zero ledger writes happen for this candidate.
+  const currentYM = getNewYorkYearMonth_(new Date());
+  const preCheck = aggregateLedgerForPeriod_(readRows_(ss, 'AIUsage'), currentYM);
+  if (preCheck.blocked) {
+    throw UserError_(
+      'AI usage ledger integrity check failed; dispatch is blocked pending review (' + preCheck.blockReason + ').',
+      'LEDGER_INTEGRITY_BLOCKED'
+    );
+  }
+  const ceilingUnits = usdToMonetaryUnits_(MONTHLY_BUDGET_CEILING_USD_);
+  if (preCheck.spendUnits + SCORING_RESERVATION_COST_UNITS_ > ceilingUnits) {
+    throw UserError_(
+      'Monthly AI budget ceiling of $' + MONTHLY_BUDGET_CEILING_USD_.toFixed(2) + ' USD reached. Current spend: $' + (preCheck.spendUnits / MONETARY_UNITS_PER_USD_).toFixed(5),
+      'BUDGET_EXCEEDED'
+    );
   }
 
-  if (callError) {
-    // Post-dispatch failure: token charge applies if available
-    const inT = (callError.inputTokens !== undefined) ? callError.inputTokens : (providerResult && providerResult.inputTokens) || 0;
-    const outT = (callError.outputTokens !== undefined) ? callError.outputTokens : (providerResult && providerResult.outputTokens) || 0;
-    reconcileUsageInDb_(ss, reservationId, inT, outT, 'Failed', callError.code || 'API_ERROR');
-    throw callError;
+  // Step 3: format the prompt BEFORE any reservation row exists, so an
+  // INVALID_PROFILE failure here never orphans a reservation.
+  const promptText = formatScoringPrompt_(job, profile);
+
+  // Step 4: prepare (countTokens + input-limit check). Still no ledger row.
+  const prepared = geminiPrepareScoringRequest_(promptText);
+
+  // Step 5: reserve. Every guaranteed pre-dispatch failure has been ruled
+  // out by this point.
+  const reservationId = checkAndReserveMonthlyBudgetInDb_(ss, job.id, runId, profileVersion);
+
+  // Step 6: dispatch — the only call that can actually spend money.
+  let providerResult;
+  let dispatchError = null;
+  try {
+    providerResult = geminiDispatchScoringRequest_(prepared);
+  } catch (err) {
+    dispatchError = err;
+  }
+
+  // Step 7: exactly one reconcile row for this attempt.
+  if (dispatchError) {
+    const inT = Number.isInteger(dispatchError.inputTokens) ? dispatchError.inputTokens : GEMINI_MAX_INPUT_TOKENS_;
+    const outT = Number.isInteger(dispatchError.outputTokens) ? dispatchError.outputTokens : GEMINI_MAX_OUTPUT_TOKENS_;
+    reconcileUsageInDb_(ss, reservationId, inT, outT, 'Failed', dispatchError.code || 'API_ERROR');
+    throw dispatchError;
   }
 
   reconcileUsageInDb_(
     ss, reservationId, providerResult.inputTokens, providerResult.outputTokens, 'Completed', ''
   );
 
-  const validation = validateScoringOutput_(providerResult.parsedOutput, job.description);
+  // Step 8: validate and publish, or quarantine.
+  const validation = validateScoringOutput_(providerResult.parsedOutput, sanitizeJobDescriptionForPrompt_(job.description));
   const now = new Date();
   const actualCost = calculateCostUsd_(providerResult.inputTokens, providerResult.outputTokens);
 
@@ -503,8 +789,6 @@ function scorePendingJobs(maxCandidates) {
     const allJobs = readRows_(ss, 'Jobs');
 
     // FIXED F7: Include jobs without score, or those whose score is out of date.
-    // wait, F7 said "Fix rescore eligibility to select jobs with no score or no validated score matching current identity".
-    // We can just rely on `overall_match === ''` if we clear it when they change, or we can select all "New" etc.
     const eligibleJobs = allJobs.filter(function (j) {
       if (!j.description || String(j.description).trim().length === 0) return false;
       const eligibleStatus = ['New', 'Reviewed', 'Saved', 'Ready to Apply'].indexOf(j.status) !== -1;
@@ -548,8 +832,8 @@ function scorePendingJobs(maxCandidates) {
         else if (res.status === 'quarantined') summary.quarantined++;
       } catch (err) {
         summary.failed++;
-        if (err && err.code === 'BUDGET_EXCEEDED') {
-          summary.stoppedReason = 'BUDGET_EXCEEDED';
+        if (err && SCORING_RUN_STOPPING_CODES_.indexOf(err.code) !== -1) {
+          summary.stoppedReason = err.code;
           break;
         }
       }
@@ -567,36 +851,16 @@ function getScoringBudgetStatus() {
   const usageRows = readRows_(ss, 'AIUsage');
   const now = new Date();
   const currentYM = getNewYorkYearMonth_(now);
+  const agg = aggregateLedgerForPeriod_(usageRows, currentYM);
 
-  let currentSpend = 0;
-  let currentCalls = 0;
-
-  usageRows.forEach(function (r) {
-    if (!r.request_started_at) return;
-    const reqDate = new Date(r.request_started_at);
-    if (isNaN(reqDate.getTime())) return;
-
-    if (getNewYorkYearMonth_(reqDate) === currentYM) {
-      // Sum all completed items or unresolved reservations
-      if (r.status === 'Completed' && r.operation === 'reconcile') {
-        currentCalls++;
-        const cost = typeof r.estimated_cost === 'number' ? r.estimated_cost : parseFloat(r.estimated_cost);
-        if (!isNaN(cost)) currentSpend += cost;
-      } else if (r.status === 'Reserved') {
-        const reconciled = usageRows.some(row => row.run_id === r.run_id && row.job_id === r.job_id && row.operation === 'reconcile');
-        if (!reconciled) {
-          const cost = typeof r.estimated_cost === 'number' ? r.estimated_cost : parseFloat(r.estimated_cost);
-          if (!isNaN(cost)) currentSpend += cost;
-        }
-      }
-    }
-  });
+  const ceilingUnits = usdToMonetaryUnits_(MONTHLY_BUDGET_CEILING_USD_);
+  const remainingUnits = agg.blocked ? 0 : Math.max(0, ceilingUnits - agg.spendUnits);
 
   return {
     monthlyCeilingUsd: MONTHLY_BUDGET_CEILING_USD_,
-    currentSpendUsd: Math.round(currentSpend * 100000) / 100000,
-    remainingSpendUsd: Math.max(0, Math.round((MONTHLY_BUDGET_CEILING_USD_ - currentSpend) * 100000) / 100000),
-    totalCallsThisMonth: currentCalls,
+    currentSpendUsd: agg.spendUnits / MONETARY_UNITS_PER_USD_,
+    remainingSpendUsd: remainingUnits / MONETARY_UNITS_PER_USD_,
+    totalCallsThisMonth: agg.totalCallsThisMonth,
     currency: 'USD'
   };
 }

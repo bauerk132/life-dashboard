@@ -407,6 +407,31 @@ describe('static checks: Phase 4A network boundary', () => {
     assert.equal(/fetch\(/.test(stripped), false, 'JavaScript.html must not contain fetch(');
   });
 
+  it('S8: Gemini calls only ever hit :generateContent or :countTokens, and no deployed file contains a "key=" query-string auth pattern', () => {
+    const pathLiterals = [];
+    const keyEqualsOccurrences = [];
+    ALL_DEPLOYED_FILES.forEach((filename) => {
+      const stripped = stripComments_(readDeployed(filename));
+      if (!/generativelanguage\.googleapis\.com/.test(stripped)) return;
+      const pathRe = /['"](\/v1beta\/models\/[^'"]*)['"]/g;
+      let m;
+      while ((m = pathRe.exec(stripped)) !== null) {
+        pathLiterals.push({ filename, path: m[1] });
+      }
+      if (/key=/.test(stripped)) {
+        keyEqualsOccurrences.push(filename);
+      }
+    });
+    assert.ok(pathLiterals.length > 0, 'expected at least one /v1beta/models/... path literal alongside a generativelanguage.googleapis.com reference');
+    pathLiterals.forEach(({ filename, path }) => {
+      assert.ok(
+        /:generateContent$/.test(path) || /:countTokens$/.test(path),
+        `${filename} builds a Gemini path that is neither :generateContent nor :countTokens: ${path}`
+      );
+    });
+    assert.deepEqual(keyEqualsOccurrences, [], `no deployed file may contain a "key=" query-string auth pattern; found in: ${keyEqualsOccurrences.join(', ')}`);
+  });
+
   it('S7: .claspignore un-ignores exactly ALL_DEPLOYED_FILES (17 files total)', () => {
     const claspignore = fs.readFileSync(path.join(ROOT, '.claspignore'), 'utf8');
     const unignored = claspignore

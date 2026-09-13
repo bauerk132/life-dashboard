@@ -23,13 +23,16 @@ function createMockGeminiResponse(scoreData, usageData) {
     salary_match: 85,
     overall_match: 84, // Will be overridden by weighted sum
     recommendation: 'Strong Match',
-    evidence: ['Required 2+ years help desk experience verified', 'Active Directory administration mentioned'],
+    // Verbatim substrings of the sample job description (see insertSampleJob)
+    // so the default fixture passes strict evidence grounding.
+    evidence: ['IT Help Desk Technician skilled in Windows 11', 'Active Directory, and customer troubleshooting'],
     gaps: ['Requires macOS support experience which is unconfirmed']
   }, scoreData || {});
 
   const usage = Object.assign({
     promptTokenCount: 520,
-    candidatesTokenCount: 140
+    candidatesTokenCount: 140,
+    totalTokenCount: 660
   }, usageData || {});
 
   return {
@@ -46,6 +49,18 @@ function createMockGeminiResponse(scoreData, usageData) {
       ],
       usageMetadata: usage
     })
+  };
+}
+
+/**
+ * Fake response for the mandatory pre-dispatch countTokens call. Every
+ * non-cached scoring attempt now makes exactly one of these before the
+ * generateContent call (see AIProvider_Gemini.gs geminiPrepareScoringRequest_).
+ */
+function createCountTokensResponse(totalTokens) {
+  return {
+    code: 200,
+    body: JSON.stringify({ totalTokens: (typeof totalTokens === 'number') ? totalTokens : 650 })
   };
 }
 
@@ -136,7 +151,7 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
     it('T02: valid Gemini 2.5 Flash response publishes score, creates JobScores record, and updates Jobs table', () => {
       const mockResponse = createMockGeminiResponse();
       const ctx = createContext({
-        urlFetch: { responses: [mockResponse] }
+        urlFetch: { responses: [createCountTokensResponse(), mockResponse] }
       });
       const job = insertSampleJob(ctx);
 
@@ -144,9 +159,11 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
       assert.equal(summary.scored, 1);
       assert.equal(summary.attempted, 1);
 
-      // Verify UrlFetchApp call details
-      assert.equal(ctx.urlFetch.calls.length, 1);
-      const call = ctx.urlFetch.calls[0];
+      // Each non-cached attempt makes a countTokens call, then a generateContent call.
+      assert.equal(ctx.urlFetch.calls.length, 2);
+      const countCall = ctx.urlFetch.calls[0];
+      assert.equal(countCall.url, 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:countTokens');
+      const call = ctx.urlFetch.calls[1];
       assert.equal(call.url, 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent');
       assert.equal(call.params.headers['x-goog-api-key'], 'test_gemini_api_key_12345');
 
@@ -179,14 +196,36 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
       assert.equal(usage[1].operation, 'reconcile');
     });
 
-    it('T03: formula injection in model response is escaped before writing to Sheet', () => {
-      // Added "Windows" so it doesn't get marked ungrounded
+    it('T03: a formula-trigger character leading an evidence item is rejected outright, not escaped-and-published', () => {
+      // Per Section 8, every evidence item must begin and end with a
+      // letter/digit; this incidentally blocks formula-leading text as a
+      // second layer even when the text is a verbatim (grounded) substring
+      // of the job description. There is no escape-and-publish path left —
+      // the whole score is rejected (Quarantined) instead.
+      const injectedDescription = 'The compensation is =HYPERLINK(evil) for this Windows systems administrator role requiring Active Directory expertise.';
       const maliciousResponse = createMockGeminiResponse({
-        evidence: ['=SUM(1+1) Windows', '@evil_command Windows', '+50000 Windows'],
-        gaps: ['-bad_gap Windows', '=cmd|\' /C calc\'!A0 Windows']
+        evidence: ['=HYPERLINK(evil) for this Windows systems administrator role']
       });
       const ctx = createContext({
-        urlFetch: { responses: [maliciousResponse] }
+        urlFetch: { responses: [createCountTokensResponse(), maliciousResponse] }
+      });
+      insertSampleJob(ctx, { description: injectedDescription });
+
+      ctx.sandbox.scorePendingJobs(1);
+
+      const ss = ctx.sandbox.getDb_();
+      const scores = ctx.sandbox.readRows_(ss, 'JobScores');
+      assert.equal(scores[0].status, 'Quarantined');
+      assert.equal(scores[0].error_code, 'EVIDENCE_TOO_SHORT');
+      assert.equal(scores[0].evidence_json, '');
+    });
+
+    it('T03b: a formula-trigger character leading a gaps item is rejected outright (INVALID_GAPS)', () => {
+      const maliciousResponse = createMockGeminiResponse({
+        gaps: ['=cmd|/c calc unconfirmed']
+      });
+      const ctx = createContext({
+        urlFetch: { responses: [createCountTokensResponse(), maliciousResponse] }
       });
       insertSampleJob(ctx);
 
@@ -194,26 +233,21 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
 
       const ss = ctx.sandbox.getDb_();
       const scores = ctx.sandbox.readRows_(ss, 'JobScores');
-      const parsedEvidence = JSON.parse(scores[0].evidence_json);
-      const parsedGaps = JSON.parse(scores[0].gaps_json);
-
-      assert.ok(parsedEvidence[0].startsWith('\'='), 'Leading = must be escaped');
-      assert.ok(parsedEvidence[1].startsWith('\'@'), 'Leading @ must be escaped');
-      assert.ok(parsedEvidence[2].startsWith('\'+'), 'Leading + must be escaped');
-      assert.ok(parsedGaps[0].startsWith('\'-'), 'Leading - must be escaped');
-      assert.ok(parsedGaps[1].startsWith('\'='), 'Leading = must be escaped');
+      assert.equal(scores[0].status, 'Quarantined');
+      assert.equal(scores[0].error_code, 'INVALID_GAPS');
     });
 
     it('T04: prompt minimization excludes candidate PII and transmits only approved profile fields', () => {
       const mockResponse = createMockGeminiResponse();
       const ctx = createContext({
-        urlFetch: { responses: [mockResponse] }
+        urlFetch: { responses: [createCountTokensResponse(), mockResponse] }
       });
       insertSampleJob(ctx);
 
       ctx.sandbox.scorePendingJobs(1);
 
-      const payload = JSON.parse(ctx.urlFetch.calls[0].params.payload);
+      // Index 1: the generateContent call (index 0 is countTokens).
+      const payload = JSON.parse(ctx.urlFetch.calls[1].params.payload);
       const promptText = payload.contents[0].parts[0].text;
 
       // PII checks
@@ -232,32 +266,36 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
     it('T05: rescoring unchanged job returns cached status with zero new UrlFetchApp calls', () => {
       const mockResponse = createMockGeminiResponse();
       const ctx = createContext({
-        urlFetch: { responses: [mockResponse] }
+        urlFetch: { responses: [createCountTokensResponse(), mockResponse] }
       });
       insertSampleJob(ctx);
 
-      // First run: calls API
+      // First run: calls API (countTokens + generateContent)
       const res1 = hostify_(ctx.sandbox.scorePendingJobs(1));
       assert.equal(res1.scored, 1);
-      assert.equal(ctx.urlFetch.calls.length, 1);
+      assert.equal(ctx.urlFetch.calls.length, 2);
 
       // Second run: should be cached
       const res2 = hostify_(ctx.sandbox.scorePendingJobs(1));
       assert.equal(res2.attempted, 0, 'No unscored jobs remaining');
-      assert.equal(ctx.urlFetch.calls.length, 1, 'UrlFetchApp must not be called again');
+      assert.equal(ctx.urlFetch.calls.length, 2, 'UrlFetchApp must not be called again');
     });
 
     it('T06: changed job description creates new cache entry and triggers rescoring', () => {
       const mockResponse1 = createMockGeminiResponse({ overall_match: 75 });
-      const mockResponse2 = createMockGeminiResponse({ overall_match: 92, recommendation: 'Strong Match' });
+      // Evidence must be grounded against the UPDATED description below.
+      const mockResponse2 = createMockGeminiResponse({
+        overall_match: 92, recommendation: 'Strong Match',
+        evidence: ['requiring specialized cloud certifications and Kubernetes']
+      });
       const ctx = createContext({
-        urlFetch: { responses: [mockResponse1, mockResponse2] }
+        urlFetch: { responses: [createCountTokensResponse(), mockResponse1, createCountTokensResponse(), mockResponse2] }
       });
       const job = insertSampleJob(ctx);
 
       // First run
       ctx.sandbox.scorePendingJobs(1);
-      assert.equal(ctx.urlFetch.calls.length, 1);
+      assert.equal(ctx.urlFetch.calls.length, 2);
 
       // Update description and clear overall_match to simulate materially changed job
       const ss = ctx.sandbox.getDb_();
@@ -269,7 +307,7 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
       // Second run
       const res2 = hostify_(ctx.sandbox.scorePendingJobs(1));
       assert.equal(res2.scored, 1);
-      assert.equal(ctx.urlFetch.calls.length, 2, 'New call must be made for changed description');
+      assert.equal(ctx.urlFetch.calls.length, 4, 'New countTokens + generateContent pair must be made for changed description');
 
       const scores = ctx.sandbox.readRows_(ss, 'JobScores');
       assert.equal(scores.length, 2, 'Two distinct score records must exist in JobScores');
@@ -277,34 +315,36 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
   });
 
   describe('Suite 3: Hard Spending Ceilings & Budget Enforcement', () => {
-    it('T07: call is blocked before network request when current monthly spend exceeds $1.00 USD', () => {
-      const ctx = createContext();
-      const ss = ctx.sandbox.getDb_();
-      insertSampleJob(ctx);
-
-      // Seed previous usage exceeding $1.00 USD
-      ctx.sandbox.appendRecordInDb_(ss, 'AIUsage', {
-        run_id: 'prior_run',
-        job_id: 'prior_job',
-        provider: 'Google Gemini',
-        model: 'gemini-2.5-flash',
-        operation: 'reconcile',
-        profile_version: '1.0.0',
-        prompt_version: '1.0.0',
-        request_started_at: new Date(),
-        request_finished_at: new Date(),
-        input_tokens: 10000000,
-        output_tokens: 2000000,
-        estimated_cost: 1.05,
-        currency: 'USD',
-        status: 'Completed',
-        error_code: ''
+    it('T07: budget boundary - reservation allowed at exactly $1.00 total, blocked one unit over', () => {
+      // Case A: prior spend $0.99365 + reservation $0.00635 = $1.00000 exactly -> allowed.
+      const ctxA = createContext();
+      const ssA = ctxA.sandbox.getDb_();
+      ctxA.sandbox.appendRecordInDb_(ssA, 'AIUsage', {
+        run_id: 'prior_run_a', job_id: 'prior_job_a', provider: 'Google Gemini', model: 'gemini-2.5-flash',
+        operation: 'reconcile', profile_version: '1.0.0', prompt_version: '1.0.0',
+        request_started_at: new Date(), request_finished_at: new Date(),
+        input_tokens: 1000, output_tokens: 1000, estimated_cost: 0.99365, currency: 'USD',
+        status: 'Completed', error_code: ''
       });
+      assert.doesNotThrow(() => {
+        ctxA.sandbox.checkAndReserveMonthlyBudgetInDb_(ssA, 'job_a', 'run_a', '1.0.0');
+      }, 'Exactly at the $1.00 ceiling must be allowed, not treated as exceeding it');
 
-      const summary = hostify_(ctx.sandbox.scorePendingJobs(1));
+      // Case B: prior spend $0.99366 + reservation $0.00635 = $1.00001 -> blocked, zero network calls.
+      const ctxB = createContext();
+      const ssB = ctxB.sandbox.getDb_();
+      ctxB.sandbox.appendRecordInDb_(ssB, 'AIUsage', {
+        run_id: 'prior_run_b', job_id: 'prior_job_b', provider: 'Google Gemini', model: 'gemini-2.5-flash',
+        operation: 'reconcile', profile_version: '1.0.0', prompt_version: '1.0.0',
+        request_started_at: new Date(), request_finished_at: new Date(),
+        input_tokens: 1000, output_tokens: 1000, estimated_cost: 0.99366, currency: 'USD',
+        status: 'Completed', error_code: ''
+      });
+      insertSampleJob(ctxB);
+      const summary = hostify_(ctxB.sandbox.scorePendingJobs(1));
       assert.equal(summary.failed, 1);
       assert.equal(summary.stoppedReason, 'BUDGET_EXCEEDED');
-      assert.equal(ctx.urlFetch.calls.length, 0, 'Zero network calls must be made when budget is exceeded');
+      assert.equal(ctxB.urlFetch.calls.length, 0, 'Zero network calls must be made when budget is exceeded');
     });
 
     it('T08: getScoringBudgetStatus accurately reports monthly spend and remaining budget', () => {
@@ -344,7 +384,7 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
         skills_match: 150 // Invalid: exceeds 100
       });
       const ctx = createContext({
-        urlFetch: { responses: [invalidScoreResponse] }
+        urlFetch: { responses: [createCountTokensResponse(), invalidScoreResponse] }
       });
       const job = insertSampleJob(ctx);
 
@@ -367,7 +407,7 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
         recommendation: 'Guaranteed Offer' // Not in closed enum
       });
       const ctx = createContext({
-        urlFetch: { responses: [invalidRecResponse] }
+        urlFetch: { responses: [createCountTokensResponse(), invalidRecResponse] }
       });
       insertSampleJob(ctx);
 
@@ -384,6 +424,7 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
       const ctx = createContext({
         urlFetch: {
           responses: [
+            createCountTokensResponse(),
             { code: 503, body: 'Service Unavailable' }
           ]
         }
@@ -421,12 +462,12 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
   });
 
   describe('Phase 5 Milestone 2 - R1-R6, F7, F9, F10 Repairs', () => {
-    it('T13: R1 corrected - Fabricated evidence claim + extra unknown key is rejected', () => {
+    it('T13: R1 corrected - unknown key is rejected before grounding is even considered', () => {
       const mockResponse = createMockGeminiResponse({
-        evidence: ['Has CCNA certification'], // not in desc
+        evidence: ['Has CCNA certification'], // not in desc, and there's also an unknown key
         extra_key: 123
       });
-      const ctx = createContext({ urlFetch: { responses: [mockResponse] } });
+      const ctx = createContext({ urlFetch: { responses: [createCountTokensResponse(), mockResponse] } });
       insertSampleJob(ctx, { description: 'Needs Windows experience.' });
 
       const summary = hostify_(ctx.sandbox.scorePendingJobs(1));
@@ -436,20 +477,22 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
       const scores = ctx.sandbox.readRows_(ss, 'JobScores');
       assert.equal(scores[0].status, 'Quarantined');
       assert.equal(scores[0].error_code, 'UNKNOWN_FIELD');
+    });
 
-      // Also test ungrounded evidence rejection
+    it('T13b: R1 corrected - fabricated (ungrounded) evidence rejects the whole score, never tags-and-publishes', () => {
       const mockResponse2 = createMockGeminiResponse({
         evidence: ['Has CCNA certification']
       });
-      const ctx2 = createContext({ urlFetch: { responses: [mockResponse2] } });
+      const ctx2 = createContext({ urlFetch: { responses: [createCountTokensResponse(), mockResponse2] } });
       insertSampleJob(ctx2, { description: 'Needs Windows experience.' });
 
       hostify_(ctx2.sandbox.scorePendingJobs(1));
       const ss2 = ctx2.sandbox.getDb_();
       const scores2 = ctx2.sandbox.readRows_(ss2, 'JobScores');
-      assert.equal(scores2[0].status, 'Validated');
-      const parsedEv = JSON.parse(scores2[0].evidence_json);
-      assert.ok(parsedEv[0].includes('[UNGROUNDED]'));
+      // Old (buggy) behavior tagged this '[UNGROUNDED]' and still published it as Validated.
+      // Corrected behavior rejects the whole score outright.
+      assert.equal(scores2[0].status, 'Quarantined');
+      assert.equal(scores2[0].error_code, 'EVIDENCE_UNSUPPORTED');
     });
 
     it('T14: R2 corrected - published overall is deterministic weighted sum, model overall override ignored', () => {
@@ -457,13 +500,13 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
         skills_match: 70, experience_match: 70, education_match: 70,
         location_match: 70, salary_match: 70, overall_match: 84
       });
-      const ctx = createContext({ urlFetch: { responses: [mockResponse] } });
+      const ctx = createContext({ urlFetch: { responses: [createCountTokensResponse(), mockResponse] } });
       insertSampleJob(ctx);
       hostify_(ctx.sandbox.scorePendingJobs(1));
 
       const ss = ctx.sandbox.getDb_();
       const scores = ctx.sandbox.readRows_(ss, 'JobScores');
-      if (!scores[0]) console.error('T14 failed summary:', summary, 'jobs:', ctx.sandbox.readRows_(ss, 'Jobs'), 'scores:', scores, 'usage:', ctx.sandbox.readRows_(ss, 'AIUsage')); assert.equal(scores[0].overall_match, 70); // 70 * weights = 70
+      assert.equal(scores[0].overall_match, 70); // 70 * weights = 70
     });
 
     it('T15: R4 corrected - Pricing math at $0.30/$2.50 rates', () => {
@@ -473,37 +516,43 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
       assert.equal(cost, 3.10);
     });
 
-    it('T16: R4 corrected - Reservation sizing >= cost of maxOutputTokens', () => {
+    it('T16: R4 corrected - reservation cost equals ceil(worst-case tokens at published rates)', () => {
       const ctx = createContext();
-      const maxOutputTokens = 2048; // from requirement
-      const inputTokens = 2000;
-      const calculatedCost = ctx.sandbox.calculateCostUsd_(inputTokens, maxOutputTokens);
-      // WORST_CASE_RESERVATION_COST_USD_ is 0.006
-      assert.ok(0.006 >= calculatedCost);
+      const ss = ctx.sandbox.getDb_();
+      const resId = ctx.sandbox.checkAndReserveMonthlyBudgetInDb_(ss, 'job123', 'run123', '1.0.0');
+      const rows = ctx.sandbox.readRows_(ss, 'AIUsage');
+      assert.equal(rows[0].id, resId);
+      // ceil((4096*30 + 2048*250) / 1e6) integer 1e-5-USD units = 635 -> $0.00635
+      assert.equal(rows[0].estimated_cost, 0.00635);
     });
 
     it('T17: R5 corrected - Cache lookup with obsolete profile version is not a cache hit', () => {
       const mockResponse = createMockGeminiResponse();
-      const ctx = createContext({ urlFetch: { responses: [mockResponse, mockResponse] } });
+      const ctx = createContext({
+        urlFetch: { responses: [createCountTokensResponse(), mockResponse, createCountTokensResponse(), mockResponse] }
+      });
       const job = insertSampleJob(ctx);
 
       hostify_(ctx.sandbox.scorePendingJobs(1));
 
       const ss = ctx.sandbox.getDb_();
       // change profile version of the existing score
-      const scores = ctx.sandbox.readRows_(ss, 'JobScores'); if(!scores[0]) console.error('T17 scores empty', summary); ctx.sandbox.updateRecordByIdInDb_(ss, 'JobScores', scores[0].id, { profile_version: '0.9.0' });
+      const scores = ctx.sandbox.readRows_(ss, 'JobScores');
+      ctx.sandbox.updateRecordByIdInDb_(ss, 'JobScores', scores[0].id, { profile_version: '0.9.0' });
       // clear jobs overall_match
       ctx.sandbox.updateRecordByIdInDb_(ss, 'Jobs', job.id, { overall_match: '' });
 
       const summary = hostify_(ctx.sandbox.scorePendingJobs(1));
       assert.equal(summary.scored, 1);
       assert.equal(summary.cached, 0);
-      assert.equal(ctx.urlFetch.calls.length, 2);
+      assert.equal(ctx.urlFetch.calls.length, 4);
     });
 
     it('T18: R5 corrected - Cache lookup matching ALL fields is a cache hit', () => {
       const mockResponse = createMockGeminiResponse();
-      const ctx = createContext({ urlFetch: { responses: [mockResponse, mockResponse] } });
+      const ctx = createContext({
+        urlFetch: { responses: [createCountTokensResponse(), mockResponse] }
+      });
       const job = insertSampleJob(ctx);
 
       hostify_(ctx.sandbox.scorePendingJobs(1));
@@ -511,7 +560,7 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
 
       const summary = hostify_(ctx.sandbox.scorePendingJobs(1));
       assert.equal(summary.cached, 1);
-      assert.equal(ctx.urlFetch.calls.length, 1); // no new call
+      assert.equal(ctx.urlFetch.calls.length, 2, 'no new call on a cache hit');
     });
 
     it('T19: R6 corrected - formatScoringPrompt_ with actual JOB_PROFILE_', () => {
@@ -547,8 +596,11 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
 
     it('T21: F7 corrected - scorePendingJobs with changed description is eligible for rescore', () => {
       const mockResponse1 = createMockGeminiResponse({ overall_match: 50 });
-      const mockResponse2 = createMockGeminiResponse({ overall_match: 99 });
-      const ctx = createContext({ urlFetch: { responses: [mockResponse1, mockResponse2] } });
+      // Evidence must be grounded against the UPDATED description below.
+      const mockResponse2 = createMockGeminiResponse({ overall_match: 99, evidence: ['Completely different description'] });
+      const ctx = createContext({
+        urlFetch: { responses: [createCountTokensResponse(), mockResponse1, createCountTokensResponse(), mockResponse2] }
+      });
       const job = insertSampleJob(ctx);
 
       hostify_(ctx.sandbox.scorePendingJobs(1));
@@ -559,7 +611,7 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
 
       const summary = hostify_(ctx.sandbox.scorePendingJobs(1));
       assert.equal(summary.scored, 1);
-      assert.equal(ctx.urlFetch.calls.length, 2);
+      assert.equal(ctx.urlFetch.calls.length, 4);
     });
 
     it('T22: F9 corrected - reconcileUsageInDb_ appends a new row instead of mutating reservation', () => {
@@ -588,7 +640,7 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
       assert.equal(ym, '2025-12');
     });
 
-    it('T24: Post-dispatch failure preserves cost', () => {
+    it('T24: Post-dispatch failure preserves cost and the aggregator counts the pair exactly once', () => {
       const ctx = createContext();
       const ss = ctx.sandbox.getDb_();
       const resId = ctx.sandbox.checkAndReserveMonthlyBudgetInDb_(ss, 'job123', 'run123', '1.0.0');
@@ -600,6 +652,11 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
       assert.equal(after[1].input_tokens, 1000);
       assert.equal(after[1].output_tokens, 500);
       assert.ok(after[1].estimated_cost > 0);
+
+      const status = hostify_(ctx.sandbox.getScoringBudgetStatus());
+      assert.equal(status.totalCallsThisMonth, 1, 'A reservation+reconcile pair counts as exactly one call');
+      assert.ok(Math.abs(status.currentSpendUsd - after[1].estimated_cost) < 1e-9,
+        'Only the reconcile cost is counted once resolved, not the reservation placeholder as well');
     });
 
     it('T25: R3 corrected - missing usageMetadata throws MISSING_USAGE_METADATA and invalid tokens throw INVALID_USAGE_DATA', () => {
@@ -627,7 +684,7 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
             code: 200,
             body: JSON.stringify({
               candidates: [{ content: { parts: [{ text: JSON.stringify({ skills_match: 70 }) }] } }],
-              usageMetadata: { promptTokenCount: -5, candidatesTokenCount: 10 }
+              usageMetadata: { promptTokenCount: -5, candidatesTokenCount: 10, totalTokenCount: 5 }
             })
           }]
         }
@@ -646,14 +703,327 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
             code: 200,
             body: JSON.stringify({
               candidates: [{ content: { parts: [{ text: JSON.stringify({ skills_match: 80 }) }] } }],
-              usageMetadata: { promptTokenCount: 500, candidatesTokenCount: 150, thoughtsTokenCount: 300 }
+              usageMetadata: { promptTokenCount: 500, candidatesTokenCount: 150, thoughtsTokenCount: 300, totalTokenCount: 950 }
             })
           }]
         }
       });
       const res = ctx.sandbox.geminiCallScoringEndpoint_('Test prompt');
       assert.equal(res.inputTokens, 500);
-      assert.equal(res.outputTokens, 450); // 150 candidates + 300 thoughts
+      assert.equal(res.outputTokens, 450); // totalTokenCount(950) - promptTokenCount(500)
+    });
+  });
+
+  describe('Suite 6: Residual correction B1-B6 — orphan reservations, ledger integrity, strict grounding', () => {
+    it('B1/B2: a pre-dispatch countTokens failure creates zero AIUsage rows (no orphan reservation)', () => {
+      const ctx = createContext({ urlFetch: { responses: [{ code: 500, body: 'error' }] } });
+      insertSampleJob(ctx);
+
+      const summary = hostify_(ctx.sandbox.scorePendingJobs(1));
+      assert.equal(summary.failed, 1);
+      assert.equal(summary.stoppedReason, 'TOKEN_COUNT_UNAVAILABLE');
+      assert.equal(ctx.urlFetch.calls.length, 1, 'Only the failed countTokens call is attempted, never generateContent');
+
+      const ss = ctx.sandbox.getDb_();
+      assert.equal(ctx.sandbox.readRows_(ss, 'AIUsage').length, 0, 'A pre-dispatch failure must never leave an orphaned reservation');
+    });
+
+    it('B1/B2: an INPUT_TOO_LARGE rejection also creates zero AIUsage rows and does not stop the run', () => {
+      const ctx = createContext({ urlFetch: { responses: [createCountTokensResponse(3585)] } });
+      insertSampleJob(ctx);
+
+      const summary = hostify_(ctx.sandbox.scorePendingJobs(1));
+      assert.equal(summary.failed, 1);
+      assert.notEqual(summary.stoppedReason, 'INPUT_TOO_LARGE', 'A single oversized job must not halt the whole run');
+
+      const ss = ctx.sandbox.getDb_();
+      assert.equal(ctx.sandbox.readRows_(ss, 'AIUsage').length, 0);
+    });
+
+    it('Boundary: countTokens exactly at the input-limit margin (3584) is accepted', () => {
+      const ctx = createContext({ urlFetch: { responses: [createCountTokensResponse(3584)] } });
+      const prepared = ctx.sandbox.geminiPrepareScoringRequest_('some prompt text');
+      assert.equal(prepared.countedTokens, 3584);
+    });
+
+    it('Boundary: countTokens one token over the margin (3585) throws INPUT_TOO_LARGE', () => {
+      const ctx = createContext({ urlFetch: { responses: [createCountTokensResponse(3585)] } });
+      assert.throws(() => {
+        ctx.sandbox.geminiPrepareScoringRequest_('some prompt text');
+      }, err => err.code === 'INPUT_TOO_LARGE');
+    });
+
+    it('Conservative charge: a transport timeout charges the full reserved input/output tokens', () => {
+      const ctx = createContext({
+        urlFetch: { responses: [createCountTokensResponse(), { throws: 'timeout while connecting' }] }
+      });
+      insertSampleJob(ctx);
+
+      const summary = hostify_(ctx.sandbox.scorePendingJobs(1));
+      assert.equal(summary.failed, 1);
+      assert.equal(summary.stoppedReason, 'TIMEOUT');
+
+      const ss = ctx.sandbox.getDb_();
+      const usage = ctx.sandbox.readRows_(ss, 'AIUsage');
+      assert.equal(usage.length, 2);
+      assert.equal(usage[1].status, 'Failed');
+      assert.equal(usage[1].error_code, 'TIMEOUT');
+      assert.equal(usage[1].input_tokens, 4096);
+      assert.equal(usage[1].output_tokens, 2048);
+    });
+
+    it('Conservative charge: missing usageMetadata after a 200 response charges the full reserved tokens', () => {
+      const ctx = createContext({
+        urlFetch: {
+          responses: [createCountTokensResponse(), {
+            code: 200,
+            body: JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify({ skills_match: 70 }) }] } }] })
+          }]
+        }
+      });
+      insertSampleJob(ctx);
+
+      const summary = hostify_(ctx.sandbox.scorePendingJobs(1));
+      assert.equal(summary.failed, 1);
+
+      const ss = ctx.sandbox.getDb_();
+      const usage = ctx.sandbox.readRows_(ss, 'AIUsage');
+      assert.equal(usage[1].error_code, 'MISSING_USAGE_METADATA');
+      assert.equal(usage[1].input_tokens, 4096);
+      assert.equal(usage[1].output_tokens, 2048);
+    });
+
+    it('Dispatch usage exceeding the bound throws USAGE_BOUND_EXCEEDED and charges the actual (validated) tokens', () => {
+      const ctx = createContext({
+        urlFetch: {
+          responses: [createCountTokensResponse(3000), {
+            code: 200,
+            body: JSON.stringify({
+              candidates: [{ content: { parts: [{ text: JSON.stringify({ skills_match: 70 }) }] } }],
+              usageMetadata: { promptTokenCount: 5000, candidatesTokenCount: 100, totalTokenCount: 5100 }
+            })
+          }]
+        }
+      });
+      insertSampleJob(ctx);
+
+      const summary = hostify_(ctx.sandbox.scorePendingJobs(1));
+      assert.equal(summary.failed, 1);
+      assert.equal(summary.stoppedReason, 'USAGE_BOUND_EXCEEDED');
+
+      const ss = ctx.sandbox.getDb_();
+      const usage = ctx.sandbox.readRows_(ss, 'AIUsage');
+      assert.equal(usage[1].error_code, 'USAGE_BOUND_EXCEEDED');
+      assert.equal(usage[1].input_tokens, 5000, 'Actual charged tokens are used once usage has been validated');
+      assert.equal(usage[1].output_tokens, 100);
+    });
+
+    it('A historical USAGE_BOUND_EXCEEDED reconcile blocks all future dispatch (ledger integrity)', () => {
+      const ctx = createContext();
+      const ss = ctx.sandbox.getDb_();
+      ctx.sandbox.appendRecordInDb_(ss, 'AIUsage', {
+        run_id: 'hist_run', job_id: 'hist_job', provider: 'Google Gemini', model: 'gemini-2.5-flash',
+        operation: 'reconcile', profile_version: '1.0.0', prompt_version: '1.0.0',
+        request_started_at: new Date(), request_finished_at: new Date(),
+        input_tokens: 4096, output_tokens: 2048, estimated_cost: 0.00635, currency: 'USD',
+        status: 'Failed', error_code: 'USAGE_BOUND_EXCEEDED'
+      });
+      insertSampleJob(ctx);
+
+      const summary = hostify_(ctx.sandbox.scorePendingJobs(1));
+      assert.equal(summary.failed, 1);
+      assert.equal(summary.stoppedReason, 'LEDGER_INTEGRITY_BLOCKED');
+      assert.equal(ctx.urlFetch.calls.length, 0, 'Blocked before any network call once ledger integrity is compromised');
+
+      const status = hostify_(ctx.sandbox.getScoringBudgetStatus());
+      assert.equal(status.remainingSpendUsd, 0, 'A blocked ledger reports zero remaining spend');
+    });
+
+    it('Aggregator: an orphan reconcile with no matching reservation still counts toward spend', () => {
+      const ctx = createContext();
+      const ss = ctx.sandbox.getDb_();
+      ctx.sandbox.appendRecordInDb_(ss, 'AIUsage', {
+        run_id: 'orphan_run', job_id: 'orphan_job', provider: 'Google Gemini', model: 'gemini-2.5-flash',
+        operation: 'reconcile', profile_version: '1.0.0', prompt_version: '1.0.0',
+        request_started_at: new Date(), request_finished_at: new Date(),
+        input_tokens: 1000, output_tokens: 500, estimated_cost: 0.00155, currency: 'USD',
+        status: 'Completed', error_code: ''
+      });
+      const status = hostify_(ctx.sandbox.getScoringBudgetStatus());
+      assert.ok(status.currentSpendUsd > 0, 'An orphan reconcile row must not be silently dropped from spend');
+      assert.equal(status.totalCallsThisMonth, 1);
+    });
+
+    it('Aggregator: a negative estimated_cost on a ledger row blocks further dispatch fail-closed', () => {
+      const ctx = createContext();
+      const ss = ctx.sandbox.getDb_();
+      ctx.sandbox.appendRecordInDb_(ss, 'AIUsage', {
+        run_id: 'bad_run', job_id: 'bad_job', provider: 'Google Gemini', model: 'gemini-2.5-flash',
+        operation: 'reconcile', profile_version: '1.0.0', prompt_version: '1.0.0',
+        request_started_at: new Date(), request_finished_at: new Date(),
+        input_tokens: 100, output_tokens: 50, estimated_cost: -0.5, currency: 'USD',
+        status: 'Completed', error_code: ''
+      });
+      insertSampleJob(ctx);
+
+      const summary = hostify_(ctx.sandbox.scorePendingJobs(1));
+      assert.equal(summary.failed, 1);
+      assert.equal(ctx.urlFetch.calls.length, 0, 'Malformed ledger data blocks dispatch before any network call');
+    });
+
+    it('finishReason other than STOP is rejected as INCOMPLETE_RESPONSE with the actual validated tokens charged', () => {
+      const ctx = createContext({
+        urlFetch: {
+          responses: [createCountTokensResponse(), {
+            code: 200,
+            body: JSON.stringify({
+              candidates: [{ finishReason: 'MAX_TOKENS', content: { parts: [{ text: '{"skills_match":70' }] } }],
+              usageMetadata: { promptTokenCount: 500, candidatesTokenCount: 100, totalTokenCount: 600 }
+            })
+          }]
+        }
+      });
+      insertSampleJob(ctx);
+      const summary = hostify_(ctx.sandbox.scorePendingJobs(1));
+      assert.equal(summary.failed, 1);
+
+      // INCOMPLETE_RESPONSE is thrown by the dispatch step itself (like
+      // USAGE_BOUND_EXCEEDED), so it never reaches a JobScores quarantine
+      // record — it is recorded as a Failed reconcile in AIUsage instead.
+      const ss = ctx.sandbox.getDb_();
+      const usage = ctx.sandbox.readRows_(ss, 'AIUsage');
+      assert.equal(usage[1].status, 'Failed');
+      assert.equal(usage[1].error_code, 'INCOMPLETE_RESPONSE');
+      assert.equal(usage[1].input_tokens, 500);
+      assert.equal(usage[1].output_tokens, 100);
+    });
+
+    it('Fractional thoughtsTokenCount is rejected as INVALID_USAGE_DATA with the conservative charge applied', () => {
+      const ctx = createContext({
+        urlFetch: {
+          responses: [createCountTokensResponse(), {
+            code: 200,
+            body: JSON.stringify({
+              candidates: [{ content: { parts: [{ text: JSON.stringify({ skills_match: 70 }) }] } }],
+              usageMetadata: { promptTokenCount: 500, candidatesTokenCount: 100, thoughtsTokenCount: 10.5, totalTokenCount: 610.5 }
+            })
+          }]
+        }
+      });
+      insertSampleJob(ctx);
+      hostify_(ctx.sandbox.scorePendingJobs(1));
+
+      const ss = ctx.sandbox.getDb_();
+      const usage = ctx.sandbox.readRows_(ss, 'AIUsage');
+      assert.equal(usage[1].error_code, 'INVALID_USAGE_DATA');
+      assert.equal(usage[1].input_tokens, 4096, 'Conservative charge applies before usage is trusted');
+      assert.equal(usage[1].output_tokens, 2048);
+    });
+
+    it('totalTokenCount inconsistent with prompt+candidates+thoughts is rejected as INVALID_USAGE_DATA', () => {
+      const ctx = createContext({
+        urlFetch: {
+          responses: [createCountTokensResponse(), {
+            code: 200,
+            body: JSON.stringify({
+              candidates: [{ content: { parts: [{ text: JSON.stringify({ skills_match: 70 }) }] } }],
+              usageMetadata: { promptTokenCount: 500, candidatesTokenCount: 100, totalTokenCount: 550 }
+            })
+          }]
+        }
+      });
+      insertSampleJob(ctx);
+      hostify_(ctx.sandbox.scorePendingJobs(1));
+
+      const ss = ctx.sandbox.getDb_();
+      const usage = ctx.sandbox.readRows_(ss, 'AIUsage');
+      assert.equal(usage[1].error_code, 'INVALID_USAGE_DATA');
+    });
+
+    it('An oversized evidence item is rejected as INVALID_EVIDENCE rather than truncated', () => {
+      const longItem = 'Windows '.repeat(80); // > 500 chars
+      const mockResponse = createMockGeminiResponse({ evidence: [longItem] });
+      const ctx = createContext({ urlFetch: { responses: [createCountTokensResponse(), mockResponse] } });
+      insertSampleJob(ctx);
+      hostify_(ctx.sandbox.scorePendingJobs(1));
+
+      const ss = ctx.sandbox.getDb_();
+      const scores = ctx.sandbox.readRows_(ss, 'JobScores');
+      assert.equal(scores[0].status, 'Quarantined');
+      assert.equal(scores[0].error_code, 'INVALID_EVIDENCE');
+    });
+
+    it('A non-string evidence array element is rejected as INVALID_EVIDENCE', () => {
+      const mockResponse = createMockGeminiResponse({ evidence: [12345] });
+      const ctx = createContext({ urlFetch: { responses: [createCountTokensResponse(), mockResponse] } });
+      insertSampleJob(ctx);
+      hostify_(ctx.sandbox.scorePendingJobs(1));
+
+      const ss = ctx.sandbox.getDb_();
+      const scores = ctx.sandbox.readRows_(ss, 'JobScores');
+      assert.equal(scores[0].status, 'Quarantined');
+      assert.equal(scores[0].error_code, 'INVALID_EVIDENCE');
+    });
+
+    it('An evidence item containing a control character is rejected as INVALID_EVIDENCE', () => {
+      const mockResponse = createMockGeminiResponse({ evidence: ['Windows 11 experience verified here'] });
+      const ctx = createContext({ urlFetch: { responses: [createCountTokensResponse(), mockResponse] } });
+      insertSampleJob(ctx);
+      hostify_(ctx.sandbox.scorePendingJobs(1));
+
+      const ss = ctx.sandbox.getDb_();
+      const scores = ctx.sandbox.readRows_(ss, 'JobScores');
+      assert.equal(scores[0].status, 'Quarantined');
+      assert.equal(scores[0].error_code, 'INVALID_EVIDENCE');
+    });
+
+    it('A gap beginning with a formula-trigger character is rejected as INVALID_GAPS even though gaps are not grounded', () => {
+      const mockResponse = createMockGeminiResponse({ gaps: ['=HYPERLINK("evil") Windows 11'] });
+      const ctx = createContext({ urlFetch: { responses: [createCountTokensResponse(), mockResponse] } });
+      insertSampleJob(ctx);
+      hostify_(ctx.sandbox.scorePendingJobs(1));
+
+      const ss = ctx.sandbox.getDb_();
+      const scores = ctx.sandbox.readRows_(ss, 'JobScores');
+      assert.equal(scores[0].status, 'Quarantined');
+      assert.equal(scores[0].error_code, 'INVALID_GAPS');
+    });
+
+    it('A non-integer score is rejected as INVALID_SCORE_RANGE', () => {
+      const mockResponse = createMockGeminiResponse({ skills_match: 85.5 });
+      const ctx = createContext({ urlFetch: { responses: [createCountTokensResponse(), mockResponse] } });
+      insertSampleJob(ctx);
+      hostify_(ctx.sandbox.scorePendingJobs(1));
+
+      const ss = ctx.sandbox.getDb_();
+      const scores = ctx.sandbox.readRows_(ss, 'JobScores');
+      assert.equal(scores[0].status, 'Quarantined');
+      assert.equal(scores[0].error_code, 'INVALID_SCORE_RANGE');
+    });
+
+    it('Evidence shorter than the minimum grounding length is rejected as EVIDENCE_TOO_SHORT', () => {
+      const mockResponse = createMockGeminiResponse({ evidence: ['Windows 11'] });
+      const ctx = createContext({ urlFetch: { responses: [createCountTokensResponse(), mockResponse] } });
+      insertSampleJob(ctx);
+      hostify_(ctx.sandbox.scorePendingJobs(1));
+
+      const ss = ctx.sandbox.getDb_();
+      const scores = ctx.sandbox.readRows_(ss, 'JobScores');
+      assert.equal(scores[0].status, 'Quarantined');
+      assert.equal(scores[0].error_code, 'EVIDENCE_TOO_SHORT');
+    });
+
+    it('scorePendingJobs stops the run on a run-stopping code other than BUDGET_EXCEEDED (e.g. AUTH_ERROR)', () => {
+      const ctx = createContext({
+        urlFetch: { responses: [createCountTokensResponse(), { code: 401, body: 'unauthorized' }] }
+      });
+      insertSampleJob(ctx);
+      insertSampleJob(ctx, { external_id: 'ext-test-2', url: 'https://example.org/job-2' });
+
+      const summary = hostify_(ctx.sandbox.scorePendingJobs(2));
+      assert.equal(summary.failed, 1);
+      assert.equal(summary.stoppedReason, 'AUTH_ERROR');
+      assert.equal(ctx.urlFetch.calls.length, 2, 'The second candidate must never be attempted after AUTH_ERROR');
     });
   });
 });
