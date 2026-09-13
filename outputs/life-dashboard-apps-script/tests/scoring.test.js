@@ -920,6 +920,29 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
       assert.equal(usage[1].output_tokens, 2048);
     });
 
+    it('B6: a negative thoughtsTokenCount (e.g. -100) is rejected as INVALID_USAGE_DATA, never silently treated as zero', () => {
+      const ctx = createContext({
+        urlFetch: {
+          responses: [createCountTokensResponse(), {
+            code: 200,
+            body: JSON.stringify({
+              candidates: [{ content: { parts: [{ text: JSON.stringify({ skills_match: 70 }) }] } }],
+              usageMetadata: { promptTokenCount: 500, candidatesTokenCount: 100, thoughtsTokenCount: -100, totalTokenCount: 500 }
+            })
+          }]
+        }
+      });
+      insertSampleJob(ctx);
+      hostify_(ctx.sandbox.scorePendingJobs(1));
+
+      const ss = ctx.sandbox.getDb_();
+      const usage = ctx.sandbox.readRows_(ss, 'AIUsage');
+      assert.equal(usage[1].status, 'Failed');
+      assert.equal(usage[1].error_code, 'INVALID_USAGE_DATA');
+      assert.equal(usage[1].input_tokens, 4096, 'Conservative charge applies before usage is trusted');
+      assert.equal(usage[1].output_tokens, 2048);
+    });
+
     it('totalTokenCount inconsistent with prompt+candidates+thoughts is rejected as INVALID_USAGE_DATA', () => {
       const ctx = createContext({
         urlFetch: {
