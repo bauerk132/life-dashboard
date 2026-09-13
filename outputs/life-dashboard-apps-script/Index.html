@@ -67,6 +67,40 @@
           Review only jobs already stored in your sheet. Opening this queue
           never searches sources or runs an AI model.
         </p>
+
+        <section class="card" id="scoring-budget-card" aria-labelledby="scoring-budget-heading">
+          <div class="section-heading-row">
+            <h3 id="scoring-budget-heading">AI Scoring &amp; Budget</h3>
+            <button type="button" id="score-next-job-btn" class="primary-button">Score next eligible job</button>
+          </div>
+          <p class="scoring-intro">
+            AI scoring assists review using automated evaluation against your target profile.
+            The 80%+ match threshold is a review aid, not a guarantee of suitability or employment outcome.
+          </p>
+          <div id="scoring-budget-status" class="scoring-budget-status" aria-busy="false">
+            <ul class="budget-stats" id="budget-stats-list">
+              <li class="budget-stat">
+                <span class="budget-label">Monthly budget</span>
+                <strong id="budget-ceiling-val">--</strong>
+              </li>
+              <li class="budget-stat">
+                <span class="budget-label">Current spend</span>
+                <strong id="budget-spend-val">--</strong>
+              </li>
+              <li class="budget-stat">
+                <span class="budget-label">Remaining</span>
+                <strong id="budget-remaining-val">--</strong>
+              </li>
+              <li class="budget-stat">
+                <span class="budget-label">Calls this month</span>
+                <strong id="budget-calls-val">--</strong>
+              </li>
+            </ul>
+            <p id="budget-alert" class="state-message is-error" hidden></p>
+          </div>
+          <div id="scoring-run-result" class="scoring-run-banner" role="status" aria-live="polite" hidden></div>
+        </section>
+
         <section class="card" aria-labelledby="jobs-queue-heading">
           <div class="section-heading-row">
             <h3 id="jobs-queue-heading">Stored job queue</h3>
