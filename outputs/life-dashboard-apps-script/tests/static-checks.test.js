@@ -51,7 +51,8 @@ const PUBLIC_ALLOWLIST = [
   'createApplication', 'setApplicationStatus', 'getApplicationById',
   'getApplicationsByJobId', 'getApplicationHistory', 'updateApplication',
   // Phase 5 Milestone 2: AI scoring and budget status
-  'scorePendingJobs', 'getScoringBudgetStatus',
+  'scorePendingJobs', 'getScoringBudgetStatus', 'getJobScoringState',
+
   // Phase 4B (Discovery.gs), editor-run administrative actions. Apps
   // Script has no "editor-only" visibility level (see the note above on
   // initializeDatabase), so each is listed honestly rather than pretending

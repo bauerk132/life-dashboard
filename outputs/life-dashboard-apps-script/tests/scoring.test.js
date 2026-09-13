@@ -1542,3 +1542,280 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Suite 8: getJobScoringState — server-owned scoring state endpoint (§4.2)
+// ---------------------------------------------------------------------------
+describe('Suite 8: getJobScoringState — server-owned scoring state endpoint', () => {
+
+  // Shared: build a JobScores row and insert it into the fake sheet.
+  function makeScoreRow(ctx, jobId, overrides) {
+    const ss = ctx.sandbox.getDb_();
+    const base = {
+      job_id: jobId,
+      status: 'Validated',
+      job_description_hash: ctx.sandbox.computeJobDescriptionHash_(
+        'We are seeking an IT Help Desk Technician skilled in Windows 11, Active Directory, and customer troubleshooting.'
+      ),
+      profile_version: '1',
+      prompt_version: '1.0.0',
+      schema_version: '1.0.0',
+      provider: 'Google Gemini',
+      model: 'gemini-2.5-flash',
+      overall_match: 84,
+      recommendation: 'Strong Match',
+      evidence_json: JSON.stringify(['IT Help Desk Technician skilled in Windows 11', 'Active Directory']),
+      gaps_json: JSON.stringify(['Requires macOS support']),
+      error_code: '',
+      input_tokens: 520,
+      output_tokens: 140,
+      estimated_cost: 0.000503,
+      validated_at: new Date('2026-09-13T10:00:00Z'),
+      created_at: new Date('2026-09-13T09:00:00Z')
+    };
+    const row = Object.assign({}, base, overrides || {});
+    ctx.sandbox.appendRecordInDb_(ss, 'JobScores', row);
+    const rows = ctx.sandbox.readRows_(ss, 'JobScores');
+    return rows[rows.length - 1];
+  }
+
+
+  it('S8-T01: invalid or blank jobId throws INVALID_ID and makes zero provider calls', () => {
+    const ctx = createContext({ urlFetch: { responses: [] } });
+
+    ['', '  ', null, undefined, 123].forEach((bad) => {
+      assert.throws(() => {
+        ctx.sandbox.getJobScoringState(bad);
+      }, (err) => {
+        return err.code === 'INVALID_ID';
+      }, 'Expected INVALID_ID for input: ' + JSON.stringify(bad));
+    });
+
+    assert.equal(ctx.urlFetch.calls.length, 0, 'Must make zero provider calls');
+  });
+
+  it('S8-T02: unknown jobId (valid format, no matching row) throws and makes zero provider calls', () => {
+    const ctx = createContext({ urlFetch: { responses: [] } });
+
+    assert.throws(() => {
+      ctx.sandbox.getJobScoringState('nonexistent-job-id');
+    }, (err) => {
+      return err.code === 'NOT_FOUND' || err.code === 'INVALID_ID';
+    });
+
+    assert.equal(ctx.urlFetch.calls.length, 0, 'Must make zero provider calls');
+  });
+
+  it('S8-T03: unscored Job returns state unscored, null score, and makes zero provider calls', () => {
+    const ctx = createContext({ urlFetch: { responses: [] } });
+    const job = insertSampleJob(ctx);
+
+    const result = hostify_(ctx.sandbox.getJobScoringState(job.id));
+
+    assert.equal(result.state, 'unscored');
+    assert.equal(result.score, null);
+    assert.equal(result.jobId, job.id);
+    assert.ok(result.currentContext, 'currentContext must be present');
+    assert.ok(result.currentContext.profileVersion, 'profileVersion must be present');
+    assert.equal(result.currentContext.promptVersion, '1.0.0');
+    assert.equal(result.currentContext.schemaVersion, '1.0.0');
+    assert.equal(result.currentContext.provider, 'Google Gemini');
+    assert.ok(result.currentContext.model, 'model must be present');
+    assert.equal(ctx.urlFetch.calls.length, 0, 'Zero provider calls for unscored');
+  });
+
+  it('S8-T04: Validated score matching all six freshness fields returns state current with safe summary', () => {
+    const ctx = createContext({ urlFetch: { responses: [] } });
+    const job = insertSampleJob(ctx);
+    makeScoreRow(ctx, job.id);
+
+    const result = hostify_(ctx.sandbox.getJobScoringState(job.id));
+
+    assert.equal(result.state, 'current', 'Must be current when all six fields match');
+    assert.ok(result.score, 'score must be non-null');
+    assert.equal(result.score.overallMatch, 84);
+    assert.equal(result.score.recommendation, 'Strong Match');
+    assert.ok(result.score.evidence.length > 0, 'evidence must be present');
+    // Must not expose internal fields.
+    assert.equal(result.score.job_description_hash, undefined, 'Must not expose job_description_hash');
+    assert.equal(result.score.input_tokens, undefined, 'Must not expose input_tokens');
+    assert.equal(result.score.estimated_cost, undefined, 'Must not expose estimated_cost');
+    assert.equal(result.score.error_code, undefined, 'Must not expose error_code');
+    assert.equal(ctx.urlFetch.calls.length, 0, 'Zero provider calls for current');
+  });
+
+  it('S8-T05a: changed description hash makes Validated score return state stale', () => {
+    const ctx = createContext({ urlFetch: { responses: [] } });
+    const job = insertSampleJob(ctx);
+    makeScoreRow(ctx, job.id);
+
+    // Mutate description in the Jobs sheet so stored hash no longer matches.
+    const ss = ctx.sandbox.getDb_();
+    ctx.sandbox.updateRecordByIdInDb_(ss, 'Jobs', job.id, {
+      description: 'COMPLETELY DIFFERENT job text that changes the hash'
+    });
+
+    const result = hostify_(ctx.sandbox.getJobScoringState(job.id));
+    assert.equal(result.state, 'stale', 'Changed description hash must yield stale');
+    assert.ok(result.score, 'score must be non-null for stale (shows old score)');
+    assert.equal(ctx.urlFetch.calls.length, 0);
+  });
+
+  it('S8-T05b: changed profile version makes Validated score return state stale', () => {
+    const ctx = createContext({ urlFetch: { responses: [] } });
+    const job = insertSampleJob(ctx);
+    makeScoreRow(ctx, job.id, { profile_version: 'OLD_VERSION_99' });
+
+    const result = hostify_(ctx.sandbox.getJobScoringState(job.id));
+    assert.equal(result.state, 'stale', 'Mismatched profile_version must yield stale');
+    assert.equal(ctx.urlFetch.calls.length, 0);
+  });
+
+  it('S8-T05c: changed prompt version makes Validated score return state stale', () => {
+    const ctx = createContext({ urlFetch: { responses: [] } });
+    const job = insertSampleJob(ctx);
+    makeScoreRow(ctx, job.id, { prompt_version: '99.0.0' });
+
+    const result = hostify_(ctx.sandbox.getJobScoringState(job.id));
+    assert.equal(result.state, 'stale', 'Mismatched prompt_version must yield stale');
+    assert.equal(ctx.urlFetch.calls.length, 0);
+  });
+
+  it('S8-T05d: changed schema version makes Validated score return state stale', () => {
+    const ctx = createContext({ urlFetch: { responses: [] } });
+    const job = insertSampleJob(ctx);
+    makeScoreRow(ctx, job.id, { schema_version: '99.0.0' });
+
+    const result = hostify_(ctx.sandbox.getJobScoringState(job.id));
+    assert.equal(result.state, 'stale', 'Mismatched schema_version must yield stale');
+    assert.equal(ctx.urlFetch.calls.length, 0);
+  });
+
+  it('S8-T05e: changed provider makes Validated score return state stale', () => {
+    const ctx = createContext({ urlFetch: { responses: [] } });
+    const job = insertSampleJob(ctx);
+    makeScoreRow(ctx, job.id, { provider: 'Old Provider' });
+
+    const result = hostify_(ctx.sandbox.getJobScoringState(job.id));
+    assert.equal(result.state, 'stale', 'Mismatched provider must yield stale');
+    assert.equal(ctx.urlFetch.calls.length, 0);
+  });
+
+  it('S8-T05f: changed model makes Validated score return state stale', () => {
+    const ctx = createContext({ urlFetch: { responses: [] } });
+    const job = insertSampleJob(ctx);
+    makeScoreRow(ctx, job.id, { model: 'old-model-1.0' });
+
+    const result = hostify_(ctx.sandbox.getJobScoringState(job.id));
+    assert.equal(result.state, 'stale', 'Mismatched model must yield stale');
+    assert.equal(ctx.urlFetch.calls.length, 0);
+  });
+
+  it('S8-T06: only Quarantined scores returns state quarantined, null score, no provider content', () => {
+    const ctx = createContext({ urlFetch: { responses: [] } });
+    const job = insertSampleJob(ctx);
+    makeScoreRow(ctx, job.id, {
+      status: 'Quarantined',
+      error_code: 'INVALID_SCORE_RANGE',
+      overall_match: '',
+      recommendation: '',
+      evidence_json: '',
+      gaps_json: ''
+    });
+
+    const result = hostify_(ctx.sandbox.getJobScoringState(job.id));
+    assert.equal(result.state, 'quarantined');
+    assert.equal(result.score, null, 'score must be null for quarantined');
+    assert.equal(ctx.urlFetch.calls.length, 0, 'Zero provider calls for quarantined');
+  });
+
+  it('S8-T07: multiple Validated candidates — newest by validated_at is selected', () => {
+    const ctx = createContext({ urlFetch: { responses: [] } });
+    const job = insertSampleJob(ctx);
+
+    makeScoreRow(ctx, job.id, {
+      overall_match: 70, recommendation: 'Older Score',
+      validated_at: new Date('2026-09-11T08:00:00Z')
+    });
+    makeScoreRow(ctx, job.id, {
+      overall_match: 91, recommendation: 'Newest Score',
+      validated_at: new Date('2026-09-13T12:00:00Z')
+    });
+    makeScoreRow(ctx, job.id, {
+      overall_match: 80, recommendation: 'Middle Score',
+      validated_at: new Date('2026-09-12T10:00:00Z')
+    });
+
+    const result = hostify_(ctx.sandbox.getJobScoringState(job.id));
+    assert.equal(result.state, 'current');
+    assert.equal(result.score.recommendation, 'Newest Score', 'Must return newest by validated_at');
+    assert.equal(result.score.overallMatch, 91);
+    assert.equal(ctx.urlFetch.calls.length, 0);
+  });
+
+  it('S8-T07b: timestamp tie broken by id ascending — result is deterministic across two calls', () => {
+    const ctx = createContext({ urlFetch: { responses: [] } });
+    const job = insertSampleJob(ctx);
+    const tieTime = new Date('2026-09-13T12:00:00Z');
+
+    makeScoreRow(ctx, job.id, {
+      overall_match: 88, recommendation: 'Score B', validated_at: tieTime
+    });
+    makeScoreRow(ctx, job.id, {
+      overall_match: 77, recommendation: 'Score A', validated_at: tieTime
+    });
+
+    const r1 = hostify_(ctx.sandbox.getJobScoringState(job.id));
+    const r2 = hostify_(ctx.sandbox.getJobScoringState(job.id));
+    assert.equal(r1.state, 'current');
+    assert.equal(r2.state, 'current');
+    assert.equal(r1.score.recommendation, r2.score.recommendation,
+      'Must be deterministic: same winner on both calls');
+    assert.equal(ctx.urlFetch.calls.length, 0);
+  });
+
+  it('S8-T08: absent validated_at falls back to id tiebreak — deterministic across two calls', () => {
+    const ctx = createContext({ urlFetch: { responses: [] } });
+    const job = insertSampleJob(ctx);
+
+    makeScoreRow(ctx, job.id, {
+      overall_match: 60, recommendation: 'No Timestamp Score', validated_at: null
+    });
+    makeScoreRow(ctx, job.id, {
+      overall_match: 75, recommendation: 'Also No Timestamp Score', validated_at: ''
+    });
+
+    const r1 = hostify_(ctx.sandbox.getJobScoringState(job.id));
+    const r2 = hostify_(ctx.sandbox.getJobScoringState(job.id));
+    assert.equal(r1.state, 'current');
+    assert.equal(r1.score.recommendation, r2.score.recommendation,
+      'Must be deterministic even when all timestamps are absent');
+    assert.equal(ctx.urlFetch.calls.length, 0);
+  });
+
+  it('S8-T09: browsing invariant — getJobScoringState makes zero provider calls across all four state paths', () => {
+    const ctxUnscored = createContext({ urlFetch: { responses: [] } });
+    const jobA = insertSampleJob(ctxUnscored);
+    ctxUnscored.sandbox.getJobScoringState(jobA.id);
+
+    const ctxCurrent = createContext({ urlFetch: { responses: [] } });
+    const jobB = insertSampleJob(ctxCurrent);
+    makeScoreRow(ctxCurrent, jobB.id);
+    ctxCurrent.sandbox.getJobScoringState(jobB.id);
+
+    const ctxStale = createContext({ urlFetch: { responses: [] } });
+    const jobC = insertSampleJob(ctxStale);
+    makeScoreRow(ctxStale, jobC.id, { model: 'old-model' });
+    ctxStale.sandbox.getJobScoringState(jobC.id);
+
+    const ctxQuarantined = createContext({ urlFetch: { responses: [] } });
+    const jobD = insertSampleJob(ctxQuarantined);
+    makeScoreRow(ctxQuarantined, jobD.id, { status: 'Quarantined', error_code: 'EMPTY_RESPONSE', evidence_json: '', gaps_json: '' });
+    ctxQuarantined.sandbox.getJobScoringState(jobD.id);
+
+    assert.equal(ctxUnscored.urlFetch.calls.length, 0, 'No provider calls for unscored');
+    assert.equal(ctxCurrent.urlFetch.calls.length, 0, 'No provider calls for current');
+    assert.equal(ctxStale.urlFetch.calls.length, 0, 'No provider calls for stale');
+    assert.equal(ctxQuarantined.urlFetch.calls.length, 0, 'No provider calls for quarantined');
+  });
+});

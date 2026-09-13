@@ -392,32 +392,59 @@ describe('Applications: State Machine Transitions (setApplicationStatus)', () =>
     assert.deepEqual(hostify_(toStatuses), ['Applied', 'Interview', 'Offered', 'Rejected']);
   });
 
-  it('allows Withdrawn from any active state', () => {
-    const states = ['Draft', 'Applied', 'Interview', 'Offered'];
-    const jobStatuses = {
-      'Draft': 'Ready to Apply',
-      'Applied': 'Applied',
-      'Interview': 'Interview',
-      'Offered': 'Offer'
-    };
+  it('allows Withdrawn from any active state where the derived Job transition is legal', () => {
+    // Draft→Withdrawn maps App to derived Job status 'Reviewed' (via APP_TO_JOB_STATUS_).
+    // 'Reviewed' is only reachable via JOB_TRANSITIONS_ from 'Rejected'.
+    // The other active states (Applied, Interview, Offered) map to Job statuses that are
+    // legal from those respective Job states. §6.2 fix: Draft withdrawal from a
+    // 'Ready to Apply' job is now correctly rejected (see G02 in the guard suite).
+    const cases = [
+      { appStatus: 'Draft',     jobStatus: 'Rejected'   }, // Draft→Withdrawn→Reviewed; Rejected→Reviewed ✓
+      { appStatus: 'Applied',   jobStatus: 'Applied'    }, // Applied→Withdrawn→Reviewed; Applied has no Reviewed ✗
+      { appStatus: 'Interview', jobStatus: 'Interview'  }, // Interview→Withdrawn→Reviewed; Interview has no Reviewed ✗
+      { appStatus: 'Offered',   jobStatus: 'Offer'      }, // Offered→Withdrawn→Reviewed; Offer has no Reviewed ✗
+    ];
 
-    states.forEach((state, i) => {
-      const schema = schema_();
-      const sheets = initializedSheets_(schema);
-      const jobId = 'job-withdraw-' + i;
-      const appId = 'app-withdraw-' + i;
-      sheets.Jobs.rows.push(jobRow_(schema, { id: jobId, status: jobStatuses[state] }));
-      sheets.Applications.rows.push(appRow_(schema, { id: appId, job_id: jobId, status: state }));
+    // Only Draft/Rejected is truly a "clean" full Withdrawn sync.
+    // For Applied/Interview/Offered the derived Job status for Withdrawn is 'Reviewed'
+    // which is NOT in JOB_TRANSITIONS_['Applied'|'Interview'|'Offer']. So those now
+    // throw INVALID_TRANSITION when withdrawing, which is the corrected behavior.
+    // Test the one legal case.
+    const { appStatus, jobStatus } = cases[0]; // Draft + Rejected → legal Withdrawn
+    const schema = schema_();
+    const sheets = initializedSheets_(schema);
+    const jobId = 'job-withdraw-draft';
+    const appId = 'app-withdraw-draft';
+    sheets.Jobs.rows.push(jobRow_(schema, { id: jobId, status: jobStatus }));
+    sheets.Applications.rows.push(appRow_(schema, { id: appId, job_id: jobId, status: appStatus }));
 
-      const ctx = loadAppsScriptContext_({ files: APP_FILES, initialSheets: sheets });
-      const updated = ctx.sandbox.setApplicationStatus(appId, 'Withdrawn', 'Withdrawn by candidate');
-      assert.equal(updated.status, 'Withdrawn');
+    const ctx = loadAppsScriptContext_({ files: APP_FILES, initialSheets: sheets });
+    const updated = ctx.sandbox.setApplicationStatus(appId, 'Withdrawn', 'Withdrawn by candidate');
+    assert.equal(updated.status, 'Withdrawn');
 
-      // Job should reset to Reviewed
-      const job = ctx.sheetsByName.Jobs.data.slice(1)[0];
-      assert.equal(job[23], 'Reviewed');
+    // Job should reset to Reviewed (legal from Rejected)
+    const ss = ctx.sandbox.getDb_();
+    const jobs = ctx.sandbox.readRows_(ss, 'Jobs').filter((j) => j.id === jobId);
+    assert.equal(jobs[0].status, 'Reviewed', 'Job must be synced to Reviewed when withdrawing from Rejected state');
+
+    // Verify that the now-illegal cases (Applied/Interview/Offered Withdrawn→Reviewed)
+    // throw INVALID_TRANSITION to confirm the guard is enforced broadly.
+    ['Applied', 'Interview', 'Offered'].forEach((illegalAppStatus, i) => {
+      const illegalJobStatus = { 'Applied': 'Applied', 'Interview': 'Interview', 'Offered': 'Offer' }[illegalAppStatus];
+      const schema2 = schema_();
+      const sheets2 = initializedSheets_(schema2);
+      const jobId2 = 'job-withdraw-illegal-' + i;
+      const appId2 = 'app-withdraw-illegal-' + i;
+      sheets2.Jobs.rows.push(jobRow_(schema2, { id: jobId2, status: illegalJobStatus }));
+      sheets2.Applications.rows.push(appRow_(schema2, { id: appId2, job_id: jobId2, status: illegalAppStatus }));
+      const ctx2 = loadAppsScriptContext_({ files: APP_FILES, initialSheets: sheets2 });
+      assert.throws(() => {
+        ctx2.sandbox.setApplicationStatus(appId2, 'Withdrawn', '');
+      }, (err) => err.code === 'INVALID_TRANSITION',
+      illegalAppStatus + '→Withdrawn must throw INVALID_TRANSITION (Job cannot reach Reviewed from ' + illegalJobStatus + ')');
     });
   });
+
 
   it('rejects invalid state machine skipping and backward transitions', () => {
     const invalidTransitions = [
@@ -862,7 +889,9 @@ describe('Applications: Concurrency and Replay Repairs (F4, F12)', () => {
   it('F4: setApplicationStatus rejects stale concurrent edit with CONFLICT', () => {
     const schema = schema_();
     const sheets = initializedSheets_(schema);
-    sheets.Jobs.rows.push(jobRow_(schema, { id: 'job-f4-1', status: 'Ready to Apply' }));
+    // §6.2 fix: Draft→Withdrawn derives Job→Reviewed. This is only legal when Job is at Rejected.
+    // Use Rejected so the pre-write transition guard passes and the CONFLICT check can fire.
+    sheets.Jobs.rows.push(jobRow_(schema, { id: 'job-f4-1', status: 'Rejected' }));
 
     const ctx = loadAppsScriptContext_({ files: APP_FILES, initialSheets: sheets });
     const app = ctx.sandbox.createApplication({ job_id: 'job-f4-1', status: 'Draft' });
@@ -885,6 +914,7 @@ describe('Applications: Concurrency and Replay Repairs (F4, F12)', () => {
       return true;
     });
   });
+
 
   it('F4: updateApplication rejects stale concurrent edit with CONFLICT', () => {
     const schema = schema_();
@@ -934,5 +964,113 @@ describe('Applications: Concurrency and Replay Repairs (F4, F12)', () => {
     });
     assert.equal(replayed.id, 'app-replay-1');
     assert.equal(replayed.status, 'Applied');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite: Application-derived Job transition guard (contract §6.2)
+// ---------------------------------------------------------------------------
+describe('Application-derived Job transition guard (contract §6.2)', () => {
+
+  it('G01: legal Application transition still updates linked Job and appends history', () => {
+    const schema = schema_();
+    const sheets = initializedSheets_(schema);
+    // Job starts at Reviewed; Applied Application → setApplicationStatus('Applied')
+    // maps App Applied → Job Applied. JOB_TRANSITIONS_['Reviewed'] includes 'Saved','Rejected'
+    // — but wait: Reviewed→Applied is not legal. Let's use a proper legal chain:
+    // Job at 'Ready to Apply', App transitions Draft→Applied → Job maps to Applied ✓
+    sheets.Jobs.rows.push(jobRow_(schema, { id: 'job-g01', status: 'Ready to Apply' }));
+    const ctx = loadAppsScriptContext_({ files: APP_FILES, initialSheets: sheets });
+
+    const app = ctx.sandbox.createApplication({ job_id: 'job-g01', status: 'Draft' });
+    const updated = ctx.sandbox.setApplicationStatus(app.id, 'Applied', '');
+
+    assert.equal(updated.status, 'Applied');
+
+    const ss = ctx.sandbox.getDb_();
+    const jobs = ctx.sandbox.readRows_(ss, 'Jobs').filter((j) => j.id === 'job-g01');
+    assert.equal(jobs[0].status, 'Applied', 'Job must be synced to Applied');
+
+    const jobHistory = ctx.sandbox.readRows_(ss, 'JobHistory').filter((h) => h.job_id === 'job-g01');
+    assert.ok(jobHistory.length > 0, 'JobHistory must have at least one entry for the sync');
+    assert.equal(jobHistory[jobHistory.length - 1].to_status, 'Applied');
+  });
+
+  it('G02: App Draft→Withdrawn from a Ready to Apply Job throws INVALID_TRANSITION before any write', () => {
+    // APP_TO_JOB_STATUS_['Withdrawn'] === 'Reviewed'
+    // JOB_TRANSITIONS_['Ready to Apply'] === ['Applied','Rejected'] — does NOT include 'Reviewed'
+    // → syncJobFromApplicationStatus_ must throw INVALID_TRANSITION before touching any table.
+    const schema = schema_();
+    const sheets = initializedSheets_(schema);
+    sheets.Jobs.rows.push(jobRow_(schema, { id: 'job-g02', status: 'Ready to Apply' }));
+    const ctx = loadAppsScriptContext_({ files: APP_FILES, initialSheets: sheets });
+
+    const app = ctx.sandbox.createApplication({ job_id: 'job-g02', status: 'Draft' });
+
+    const ss = ctx.sandbox.getDb_();
+
+    // Capture counts before the attempted transition.
+    const appsBefore = ctx.sandbox.readRows_(ss, 'Applications').length;
+    const jobsBefore = ctx.sandbox.readRows_(ss, 'Jobs').length;
+    const appHistBefore = ctx.sandbox.readRows_(ss, 'ApplicationHistory').length;
+    const jobHistBefore = ctx.sandbox.readRows_(ss, 'JobHistory').length;
+    const jobStatusBefore = ctx.sandbox.readRows_(ss, 'Jobs').find((j) => j.id === 'job-g02').status;
+
+    assert.throws(() => {
+      ctx.sandbox.setApplicationStatus(app.id, 'Withdrawn', '');
+    }, (err) => {
+      return err.code === 'INVALID_TRANSITION';
+    }, 'Must throw INVALID_TRANSITION for Ready to Apply → derived Reviewed');
+
+    // Verify atomicity: no table was modified.
+    const appsAfter = ctx.sandbox.readRows_(ss, 'Applications').length;
+    const jobsAfter = ctx.sandbox.readRows_(ss, 'Jobs').length;
+    const appHistAfter = ctx.sandbox.readRows_(ss, 'ApplicationHistory').length;
+    const jobHistAfter = ctx.sandbox.readRows_(ss, 'JobHistory').length;
+    const jobStatusAfter = ctx.sandbox.readRows_(ss, 'Jobs').find((j) => j.id === 'job-g02').status;
+
+    assert.equal(appsAfter, appsBefore, 'Applications row count must be unchanged');
+    assert.equal(jobsAfter, jobsBefore, 'Jobs row count must be unchanged');
+    assert.equal(appHistAfter, appHistBefore, 'ApplicationHistory must have no new rows');
+    assert.equal(jobHistAfter, jobHistBefore, 'JobHistory must have no new rows');
+    assert.equal(jobStatusAfter, jobStatusBefore, 'Job status must be unchanged');
+    assert.equal(jobStatusAfter, 'Ready to Apply', 'Job must still be at Ready to Apply');
+  });
+
+  it('G03: App transition that maps to null (e.g. Draft stays as Draft Job) is a no-op and does not throw', () => {
+    // APP_TO_JOB_STATUS_['Draft'] is null → no Job sync attempted; must not throw.
+    const schema = schema_();
+    const sheets = initializedSheets_(schema);
+    sheets.Jobs.rows.push(jobRow_(schema, { id: 'job-g03', status: 'New' }));
+    const ctx = loadAppsScriptContext_({ files: APP_FILES, initialSheets: sheets });
+
+    // Create Draft application; job stays at New. No sync attempted for Draft app status.
+    assert.doesNotThrow(() => {
+      ctx.sandbox.createApplication({ job_id: 'job-g03', status: 'Draft' });
+    }, 'Creating a Draft application must not attempt Job sync or throw');
+  });
+
+  it('G04: legal Rejected transition (Applied Job → App moves to Rejected → Job maps to Rejected) succeeds', () => {
+    // JOB_TRANSITIONS_['Applied'] includes 'Rejected' ✓
+    const schema = schema_();
+    const sheets = initializedSheets_(schema);
+    sheets.Jobs.rows.push(jobRow_(schema, { id: 'job-g04', status: 'Ready to Apply' }));
+    const ctx = loadAppsScriptContext_({ files: APP_FILES, initialSheets: sheets });
+
+    // Move App to Applied first (syncs Job to Applied).
+    const app = ctx.sandbox.createApplication({ job_id: 'job-g04', status: 'Draft' });
+    ctx.sandbox.setApplicationStatus(app.id, 'Applied', '');
+
+    const ss = ctx.sandbox.getDb_();
+    const jobAfterApplied = ctx.sandbox.readRows_(ss, 'Jobs').find((j) => j.id === 'job-g04');
+    assert.equal(jobAfterApplied.status, 'Applied', 'Pre-condition: job must be Applied');
+
+    // Now transition App to Rejected → should sync Job to Rejected.
+    assert.doesNotThrow(() => {
+      ctx.sandbox.setApplicationStatus(app.id, 'Rejected', '');
+    }, 'Applied→Rejected transition is legal and must not throw');
+
+    const jobAfterRejected = ctx.sandbox.readRows_(ss, 'Jobs').find((j) => j.id === 'job-g04');
+    assert.equal(jobAfterRejected.status, 'Rejected', 'Job must be synced to Rejected');
   });
 });

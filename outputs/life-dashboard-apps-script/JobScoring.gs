@@ -775,6 +775,168 @@ function scoreSingleJobInDb_(ss, job, runId) {
 }
 
 /**
+ * Browser-callable. Returns the server-computed scoring state for a single Job.
+ *
+ * Read-only: makes zero UrlFetchApp calls, zero ledger writes, and no state
+ * mutations of any kind. The six-field freshness comparison is intentionally
+ * server-owned so the UI never needs to duplicate or approximate it.
+ *
+ * Contract §4.2 (PHASE_5_INTERFACE_CONTRACT.md):
+ *   Returns { jobId, state, score, currentContext } where state is one of:
+ *   'unscored' | 'current' | 'stale' | 'quarantined'.
+ *
+ * - 'unscored'    – no JobScores row exists for this Job.
+ * - 'current'     – at least one Validated score matches all six freshness fields.
+ *                   If multiple match, returns the newest by validated_at (stable id fallback).
+ * - 'stale'       – at least one Validated score exists but none matches all six fields.
+ *                   Returns the newest Validated score for display only.
+ * - 'quarantined' – no Validated score exists; one or more Quarantined rows do.
+ *                   score is null; no internal error/provider content is exposed.
+ *
+ * score is null for 'unscored' and 'quarantined'.
+ * score contains only user-visible summary fields — never request hashes, token totals,
+ * cost, historical profile/prompt/schema values, or error codes.
+ */
+function getJobScoringState(jobId) {
+  if (!jobId || typeof jobId !== 'string' || jobId.trim() === '') {
+    throw UserError_('A valid job id is required.', 'INVALID_ID');
+  }
+  const cleanId = jobId.trim();
+
+  const ss = getDb_();
+
+  // Validate job exists using the established safe id behaviour (throws INVALID_ID / NOT_FOUND).
+  findUniqueJobById_(ss, cleanId);
+
+  // Read all score rows for this job in one pass. Never expose raw rows to caller.
+  const allScores = readRows_(ss, 'JobScores').filter(function (s) {
+    return s.job_id === cleanId;
+  });
+
+  // Compute the current six freshness fields server-side.
+  const profile = typeof JOB_PROFILE_ !== 'undefined' ? JOB_PROFILE_ : { configVersion: 1 };
+  const profileVersion = (profile && profile.configVersion)
+    ? profile.configVersion.toString()
+    : '1.0.0';
+
+  const currentContext = {
+    profileVersion: profileVersion,
+    promptVersion: PROMPT_VERSION_,
+    schemaVersion: SCORING_SCHEMA_VERSION_,
+    provider: 'Google Gemini',
+    model: GEMINI_MODEL_
+  };
+
+  // No scores at all → unscored.
+  if (allScores.length === 0) {
+    return { jobId: cleanId, state: 'unscored', score: null, currentContext: currentContext };
+  }
+
+  // Partition into Validated and Quarantined rows.
+  const validated = allScores.filter(function (s) { return s.status === 'Validated'; });
+  const quarantined = allScores.filter(function (s) { return s.status === 'Quarantined'; });
+
+  // Helper: pick newest deterministic row. Primary sort: validated_at descending.
+  // Stable fallback: row id ascending (lexicographic) to guarantee a single winner on tie/absence.
+  function newestDeterministic(rows) {
+    return rows.slice().sort(function (a, b) {
+      const tA = a.validated_at ? new Date(a.validated_at).getTime() : 0;
+      const tB = b.validated_at ? new Date(b.validated_at).getTime() : 0;
+      if (tB !== tA) return tB - tA;
+      // Stable tiebreak: lexicographic ascending on id.
+      return String(a.id || '').localeCompare(String(b.id || ''));
+    })[0];
+  }
+
+  // Helper: build the safe user-visible score summary from a score row.
+  // Must not expose request hashes, token totals, cost, profile/prompt/schema
+  // historical metadata, or error codes.
+  function safeSummary(row) {
+    // evidence and gaps are stored as JSON-serialised arrays in evidence_json / gaps_json.
+    // Join them as a human-readable string for display; never expose the raw JSON.
+    function safeJoinJson(jsonStr) {
+      if (!jsonStr) return '';
+      try {
+        const parsed = JSON.parse(jsonStr);
+        return Array.isArray(parsed) ? parsed.join('; ') : safeDisplayText_(String(jsonStr), '');
+      } catch (_) {
+        return '';
+      }
+    }
+    return {
+      id: row.id,
+      overallMatch: typeof row.overall_match === 'number' ? row.overall_match
+        : (row.overall_match !== '' && row.overall_match !== undefined ? Number(row.overall_match) : null),
+      recommendation: safeDisplayText_(row.recommendation, ''),
+      evidence: safeJoinJson(row.evidence_json),
+      gaps: safeJoinJson(row.gaps_json),
+      validatedAt: row.validated_at
+        ? (row.validated_at instanceof Date
+          ? row.validated_at.toISOString()
+          : String(row.validated_at))
+        : null
+    };
+  }
+
+
+  // Check for a 'current' score: a Validated row matching all six freshness fields.
+  const freshValidated = validated.filter(function (s) {
+    return s.profile_version === profileVersion &&
+      s.prompt_version === PROMPT_VERSION_ &&
+      s.schema_version === SCORING_SCHEMA_VERSION_ &&
+      s.provider === 'Google Gemini' &&
+      s.model === GEMINI_MODEL_;
+    // Note: description hash requires the job's description, which is already
+    // committed to the score row as job_description_hash. We need the job row
+    // to get current hash. Read it back to compare.
+  });
+
+  // To compare the description hash we need the job's current description.
+  // We already validated the job exists; read it to get the hash.
+  const job = findUniqueJobById_(ss, cleanId);
+  const currentDescHash = computeJobDescriptionHash_(job.description || '');
+
+  const trulyFresh = freshValidated.filter(function (s) {
+    return s.job_description_hash === currentDescHash;
+  });
+
+  if (trulyFresh.length > 0) {
+    const best = newestDeterministic(trulyFresh);
+    return {
+      jobId: cleanId,
+      state: 'current',
+      score: safeSummary(best),
+      currentContext: currentContext
+    };
+  }
+
+  // Any Validated rows exist but none is fresh → stale.
+  if (validated.length > 0) {
+    const best = newestDeterministic(validated);
+    return {
+      jobId: cleanId,
+      state: 'stale',
+      score: safeSummary(best),
+      currentContext: currentContext
+    };
+  }
+
+  // No Validated rows; Quarantined rows exist → quarantined.
+  if (quarantined.length > 0) {
+    return {
+      jobId: cleanId,
+      state: 'quarantined',
+      score: null,
+      currentContext: currentContext
+    };
+  }
+
+  // All rows are in some other status (e.g. only a bare reservation with no outcome).
+  // Treat as unscored — the job has not produced a Validated or Quarantined score yet.
+  return { jobId: cleanId, state: 'unscored', score: null, currentContext: currentContext };
+}
+
+/**
  * Public entry point to score unscored or changed jobs.
  * Bounded by MAX_CANDIDATES_PER_RUN_ and monthly budget ceiling.
  */

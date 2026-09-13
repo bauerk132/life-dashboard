@@ -187,11 +187,26 @@ function parseApplicationStoredDate_(value) {
 /**
  * Synchronizes linked Job when Application status changes.
  * Direct database write under the caller's held script lock — does not call setJobStatus.
+ *
+ * Contract §6.2: Before changing either entity, validates that the derived Job
+ * target state is allowed from the linked Job's current state per JOB_TRANSITIONS_.
+ * If the transition is illegal, throws INVALID_TRANSITION before any data or
+ * history write (Applications, Jobs, ApplicationHistory, JobHistory are all unchanged).
  */
 function syncJobFromApplicationStatus_(ss, job, targetAppStatus, sanitizedNote) {
   const targetJobStatus = APP_TO_JOB_STATUS_[targetAppStatus];
   if (!targetJobStatus || job.status === targetJobStatus) {
     return;
+  }
+
+  // §6.2 guard: check that the derived Job transition is legal before any write.
+  const allowedJobTransitions = JOB_TRANSITIONS_[job.status];
+  if (!allowedJobTransitions || allowedJobTransitions.indexOf(targetJobStatus) === -1) {
+    throw UserError_(
+      'Cannot transition job from ' + job.status + ' to ' + targetJobStatus +
+      ' (derived from application transition to ' + targetAppStatus + ').',
+      'INVALID_TRANSITION'
+    );
   }
 
   const jobUpdates = {
@@ -210,6 +225,7 @@ function syncJobFromApplicationStatus_(ss, job, targetAppStatus, sanitizedNote) 
     created_at: new Date()
   });
 }
+
 
 /**
  * Reverse sync invoked defensively by setJobStatus in Jobs.gs.
@@ -403,6 +419,22 @@ function setApplicationStatus(applicationId, targetStatus, note) {
     if (targetStatus === 'Applied') {
       if (job.status !== 'Ready to Apply' && job.status !== 'Applied') {
         throw UserError_('Job cannot transition to Applied from ' + job.status + '.', 'INVALID_TRANSITION');
+      }
+    }
+
+    // §6.2 pre-write guard: validate the derived Job transition before any entity write.
+    // syncJobFromApplicationStatus_ also checks this, but the check here ensures that
+    // Applications, ApplicationHistory, Jobs, and JobHistory are all unchanged if the
+    // derived Job transition is illegal.
+    const derivedJobStatus = APP_TO_JOB_STATUS_[targetStatus];
+    if (derivedJobStatus && job.status !== derivedJobStatus) {
+      const allowedJobTransitions = JOB_TRANSITIONS_[job.status];
+      if (!allowedJobTransitions || allowedJobTransitions.indexOf(derivedJobStatus) === -1) {
+        throw UserError_(
+          'Cannot transition job from ' + job.status + ' to ' + derivedJobStatus +
+          ' (derived from application transition to ' + targetStatus + ').',
+          'INVALID_TRANSITION'
+        );
       }
     }
 
