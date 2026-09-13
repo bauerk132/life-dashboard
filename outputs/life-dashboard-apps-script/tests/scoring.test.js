@@ -92,7 +92,8 @@ function createContext(overrides) {
     files: ALL_DEPLOYED_GS,
     scriptProperties: scriptProps,
     initialSheets: initialSheets,
-    urlFetch: overrides.urlFetch || { responses: [] }
+    urlFetch: overrides.urlFetch || { responses: [] },
+    fakeClock: overrides.fakeClock
   });
 }
 
@@ -1047,6 +1048,497 @@ describe('Phase 5 Milestone 2: AI Scoring & Evidence Ledger', () => {
       assert.equal(summary.failed, 1);
       assert.equal(summary.stoppedReason, 'AUTH_ERROR');
       assert.equal(ctx.urlFetch.calls.length, 2, 'The second candidate must never be attempted after AUTH_ERROR');
+    });
+  });
+
+  describe('Suite 7: Ledger-edge test suite', () => {
+    it('Test 1: duplicate reservation rows are not collapsed into one low-cost attempt and block at ceiling', () => {
+      const ctx = createContext();
+      const ss = ctx.sandbox.getDb_();
+      const now = new Date();
+      const currentYM = ctx.sandbox.getNewYorkYearMonth_(now);
+
+      // Two 'score_job' reservations for the exact same run_id + job_id.
+      // Each reservation is $0.50 USD (50,000 units). Together they sum to $1.00 USD (100,000 units),
+      // which equals the monthly budget ceiling.
+      const runId = 'dup_run_1';
+      const jobId = 'dup_job_1';
+
+      ctx.sandbox.appendRecordInDb_(ss, 'AIUsage', {
+        run_id: runId,
+        job_id: jobId,
+        provider: 'Google Gemini',
+        model: 'gemini-2.5-flash',
+        operation: 'score_job',
+        profile_version: '1.0.0',
+        prompt_version: '1.0.0',
+        request_started_at: now,
+        request_finished_at: '',
+        input_tokens: 0,
+        output_tokens: 0,
+        estimated_cost: 0.50,
+        currency: 'USD',
+        status: 'Reserved',
+        error_code: ''
+      });
+
+      ctx.sandbox.appendRecordInDb_(ss, 'AIUsage', {
+        run_id: runId,
+        job_id: jobId,
+        provider: 'Google Gemini',
+        model: 'gemini-2.5-flash',
+        operation: 'score_job',
+        profile_version: '1.0.0',
+        prompt_version: '1.0.0',
+        request_started_at: now,
+        request_finished_at: '',
+        input_tokens: 0,
+        output_tokens: 0,
+        estimated_cost: 0.50,
+        currency: 'USD',
+        status: 'Reserved',
+        error_code: ''
+      });
+
+      // 1. Direct aggregator verification
+      const usageRows = ctx.sandbox.readRows_(ss, 'AIUsage');
+      const agg = ctx.sandbox.aggregateLedgerForPeriod_(usageRows, currentYM);
+
+      // Prove the aggregator follows its frozen conservative policy:
+      // It counts every relevant duplicate row (50,000 + 50,000 = 100,000 units)
+      // rather than collapsing into a single low-cost reservation (50,000 units)
+      assert.equal(agg.anomaly, true, 'agg.anomaly must be true when duplicate reservation rows exist');
+      assert.equal(agg.spendUnits, 100000, 'Duplicate reservation rows must not be collapsed; both must be counted in spend');
+      assert.equal(agg.totalCallsThisMonth, 2, 'Both duplicate reservation rows must be counted in totalCallsThisMonth');
+      assert.equal(agg.blocked, false, 'Duplicate reservation rows trigger anomaly flag but do not corrupt ledger into hard block');
+
+      // 2. Budget status inspection
+      const status = hostify_(ctx.sandbox.getScoringBudgetStatus());
+      assert.equal(status.monthlyCeilingUsd, 1.00);
+      assert.equal(status.currentSpendUsd, 1.00, 'Current spend must reflect conservative sum of both duplicate reservations');
+      assert.equal(status.remainingSpendUsd, 0, 'Zero remaining spend when conservative total reaches $1.00 ceiling');
+      assert.equal(status.totalCallsThisMonth, 2);
+
+      // 3. Prove a later reservation is blocked whenever the conservative total reaches the monthly ceiling
+      // If the duplicates had been collapsed into one ($0.50), then $0.50 + $0.00635 = $0.50635 <= $1.00,
+      // which would have erroneously succeeded.
+      // Because both are counted ($1.00), $1.00 + $0.00635 = $1.00635 > $1.00, so it must throw BUDGET_EXCEEDED.
+      assert.throws(() => {
+        ctx.sandbox.checkAndReserveMonthlyBudgetInDb_(ss, 'new_job_1', 'new_run_1', '1.0.0');
+      }, (err) => {
+        assert.equal(err.code, 'BUDGET_EXCEEDED', 'Must throw BUDGET_EXCEEDED when conservative total reaches monthly ceiling');
+        return true;
+      });
+
+      // 4. Verify higher-level scorePendingJobs also halts with BUDGET_EXCEEDED and 0 network calls
+      insertSampleJob(ctx);
+      const summary = hostify_(ctx.sandbox.scorePendingJobs(1));
+      assert.equal(summary.failed, 1);
+      assert.equal(summary.stoppedReason, 'BUDGET_EXCEEDED');
+      assert.equal(ctx.urlFetch.calls.length, 0, 'Zero network calls must be made when conservative total blocks reservation');
+    });
+
+    it('Test 2: duplicate reconciliation rows do not hide either recorded charge and are conservatively summed', () => {
+      const ctx = createContext();
+      const ss = ctx.sandbox.getDb_();
+      const now = new Date();
+      const currentYM = ctx.sandbox.getNewYorkYearMonth_(now);
+
+      const runId = 'dup_rec_run_1';
+      const jobId = 'dup_rec_job_1';
+
+      // Two 'reconcile' rows for the same pairing key (run_id + job_id)
+      const cost1Usd = 0.00155; // 155 monetary units
+      const cost2Usd = 0.00186; // 186 monetary units
+      const cost1Units = ctx.sandbox.usdToMonetaryUnits_(cost1Usd);
+      const cost2Units = ctx.sandbox.usdToMonetaryUnits_(cost2Usd);
+      const expectedSumUnits = cost1Units + cost2Units; // 341 units
+      const expectedSumUsd = expectedSumUnits / 100000; // 0.00341 USD
+
+      ctx.sandbox.appendRecordInDb_(ss, 'AIUsage', {
+        run_id: runId,
+        job_id: jobId,
+        provider: 'Google Gemini',
+        model: 'gemini-2.5-flash',
+        operation: 'reconcile',
+        profile_version: '1.0.0',
+        prompt_version: '1.0.0',
+        request_started_at: now,
+        request_finished_at: now,
+        input_tokens: 1000,
+        output_tokens: 500,
+        estimated_cost: cost1Usd,
+        currency: 'USD',
+        status: 'Completed',
+        error_code: ''
+      });
+
+      ctx.sandbox.appendRecordInDb_(ss, 'AIUsage', {
+        run_id: runId,
+        job_id: jobId,
+        provider: 'Google Gemini',
+        model: 'gemini-2.5-flash',
+        operation: 'reconcile',
+        profile_version: '1.0.0',
+        prompt_version: '1.0.0',
+        request_started_at: now,
+        request_finished_at: now,
+        input_tokens: 1200,
+        output_tokens: 600,
+        estimated_cost: cost2Usd,
+        currency: 'USD',
+        status: 'Completed',
+        error_code: ''
+      });
+
+      // 1. Direct aggregator verification
+      const usageRows = ctx.sandbox.readRows_(ss, 'AIUsage');
+      const agg = hostify_(ctx.sandbox.aggregateLedgerForPeriod_(usageRows, currentYM));
+
+      // Prove current-period spend is conservatively summed (both rows included in spendUnits)
+      assert.equal(agg.spendUnits, expectedSumUnits, 'spendUnits must include both reconciliation rows');
+      assert.notEqual(agg.spendUnits, cost1Units, 'spendUnits must not be silently reduced to row 1');
+      assert.notEqual(agg.spendUnits, cost2Units, 'spendUnits must not be silently reduced to row 2');
+      assert.ok(agg.spendUnits > cost1Units && agg.spendUnits > cost2Units, 'spendUnits must strictly exceed either individual row charge');
+
+      // Prove agg.anomaly is true
+      assert.equal(agg.anomaly, true, 'agg.anomaly must be true when duplicate reconciliation rows exist for the same pairing key');
+      assert.equal(agg.blocked, false, 'Duplicate reconciliations without USAGE_BOUND_EXCEEDED do not hard-block dispatch');
+
+      // 2. Budget status inspection (proving currentSpendUsd includes both rows)
+      const status = hostify_(ctx.sandbox.getScoringBudgetStatus());
+      assert.equal(status.monthlyCeilingUsd, 1.00);
+      assert.equal(status.currentSpendUsd, expectedSumUsd, 'currentSpendUsd must reflect conservative sum of both duplicate reconciliations');
+      assert.notEqual(status.currentSpendUsd, cost1Usd, 'currentSpendUsd must not be reduced to row 1');
+      assert.notEqual(status.currentSpendUsd, cost2Usd, 'currentSpendUsd must not be reduced to row 2');
+      assert.equal(status.remainingSpendUsd, (100000 - expectedSumUnits) / 100000);
+
+      // 3. Prove that when a reservation row is also present with duplicate reconciliations,
+      // all entries for the pairing key are conservatively summed and neither charge is hidden.
+      const pairedCtx = createContext();
+      const ssPaired = pairedCtx.sandbox.getDb_();
+      const resCostUsd = 0.00635;
+      const resCostUnits = pairedCtx.sandbox.usdToMonetaryUnits_(resCostUsd); // 635 units
+
+      pairedCtx.sandbox.appendRecordInDb_(ssPaired, 'AIUsage', {
+        run_id: 'paired_run',
+        job_id: 'paired_job',
+        provider: 'Google Gemini',
+        model: 'gemini-2.5-flash',
+        operation: 'score_job',
+        profile_version: '1.0.0',
+        prompt_version: '1.0.0',
+        request_started_at: now,
+        request_finished_at: '',
+        input_tokens: 0,
+        output_tokens: 0,
+        estimated_cost: resCostUsd,
+        currency: 'USD',
+        status: 'Reserved',
+        error_code: ''
+      });
+      pairedCtx.sandbox.appendRecordInDb_(ssPaired, 'AIUsage', {
+        run_id: 'paired_run',
+        job_id: 'paired_job',
+        provider: 'Google Gemini',
+        model: 'gemini-2.5-flash',
+        operation: 'reconcile',
+        profile_version: '1.0.0',
+        prompt_version: '1.0.0',
+        request_started_at: now,
+        request_finished_at: now,
+        input_tokens: 1000,
+        output_tokens: 500,
+        estimated_cost: cost1Usd,
+        currency: 'USD',
+        status: 'Completed',
+        error_code: ''
+      });
+      pairedCtx.sandbox.appendRecordInDb_(ssPaired, 'AIUsage', {
+        run_id: 'paired_run',
+        job_id: 'paired_job',
+        provider: 'Google Gemini',
+        model: 'gemini-2.5-flash',
+        operation: 'reconcile',
+        profile_version: '1.0.0',
+        prompt_version: '1.0.0',
+        request_started_at: now,
+        request_finished_at: now,
+        input_tokens: 1200,
+        output_tokens: 600,
+        estimated_cost: cost2Usd,
+        currency: 'USD',
+        status: 'Completed',
+        error_code: ''
+      });
+
+      const pairedRows = pairedCtx.sandbox.readRows_(ssPaired, 'AIUsage');
+      const aggPaired = hostify_(pairedCtx.sandbox.aggregateLedgerForPeriod_(pairedRows, currentYM));
+      assert.equal(aggPaired.anomaly, true, 'agg.anomaly must be true for pairing key with duplicate reconciles');
+      assert.equal(aggPaired.spendUnits, resCostUnits + expectedSumUnits, 'Reservation plus both reconcile rows must all be summed');
+    });
+
+    it('Test 3: invalid or absent date does not vanish from current period, ensuring conservative accounting and preventing budget bypass', () => {
+      const ctx = createContext();
+      const ss = ctx.sandbox.getDb_();
+      const now = new Date();
+      const currentYM = ctx.sandbox.getNewYorkYearMonth_(now);
+
+      // 1. Direct unit verification of ledgerRowPeriod_ fallback logic
+      // Absent dates (empty string, null, undefined) must attribute to targetYearMonth
+      assert.equal(
+        ctx.sandbox.ledgerRowPeriod_({ request_started_at: '' }, currentYM),
+        currentYM,
+        'Empty string request_started_at must fall back to targetYearMonth'
+      );
+      assert.equal(
+        ctx.sandbox.ledgerRowPeriod_({ request_started_at: null }, currentYM),
+        currentYM,
+        'Null request_started_at must fall back to targetYearMonth'
+      );
+      assert.equal(
+        ctx.sandbox.ledgerRowPeriod_({}, currentYM),
+        currentYM,
+        'Omitted request_started_at must fall back to targetYearMonth'
+      );
+
+      // Invalid/unparseable date string must attribute to targetYearMonth
+      assert.equal(
+        ctx.sandbox.ledgerRowPeriod_({ request_started_at: 'NOT_A_VALID_DATE_STRING' }, currentYM),
+        currentYM,
+        'Malformed/unparseable date string must fall back to targetYearMonth'
+      );
+
+      // In contrast, a valid timestamp belonging to another month must NOT attribute to currentYM
+      const otherMonth = currentYM === '2026-08' ? '2026-07' : '2026-08';
+      assert.equal(
+        ctx.sandbox.ledgerRowPeriod_({ request_started_at: `${otherMonth}-15T12:00:00Z` }, currentYM),
+        otherMonth,
+        'Valid timestamp from a different period must resolve to its own period, not targetYearMonth'
+      );
+
+      // 2. Integration proof: an absent date row does not vanish and is included in currentSpendUsd
+      const absentDateCostUsd = 0.25;
+      const absentDateCostUnits = ctx.sandbox.usdToMonetaryUnits_(absentDateCostUsd); // 25,000 units
+      ctx.sandbox.appendRecordInDb_(ss, 'AIUsage', {
+        run_id: 'absent_date_run',
+        job_id: 'absent_date_job',
+        provider: 'Google Gemini',
+        model: 'gemini-2.5-flash',
+        operation: 'reconcile',
+        profile_version: '1.0.0',
+        prompt_version: '1.0.0',
+        request_started_at: '',
+        request_finished_at: '',
+        input_tokens: 1000,
+        output_tokens: 500,
+        estimated_cost: absentDateCostUsd,
+        currency: 'USD',
+        status: 'Completed',
+        error_code: ''
+      });
+
+      const usageRows1 = ctx.sandbox.readRows_(ss, 'AIUsage');
+      const agg1 = hostify_(ctx.sandbox.aggregateLedgerForPeriod_(usageRows1, currentYM));
+      assert.equal(agg1.spendUnits, absentDateCostUnits, 'Spend with absent date must be counted in target period units');
+      assert.equal(agg1.totalCallsThisMonth, 1, 'Absent date orphan reconcile must be counted in totalCallsThisMonth');
+
+      const status1 = hostify_(ctx.sandbox.getScoringBudgetStatus());
+      assert.equal(status1.currentSpendUsd, absentDateCostUsd, 'currentSpendUsd must include absent date row cost');
+      assert.equal(status1.remainingSpendUsd, 0.75, 'remainingSpendUsd must reflect deduction of absent date row');
+
+      // 3. Integration proof: an invalid date row that brings total spend near ceiling blocks reservation and prevents budget bypass
+      // Reset DB with a new context to isolate the ceiling-bypass test cleanly
+      const bypassCtx = createContext();
+      const bypassSs = bypassCtx.sandbox.getDb_();
+
+      // Near ceiling: $0.99500 (99,500 units). Adding reservation $0.00635 (635 units) = $1.00135 (100,135 units) > $1.00000.
+      const nearCeilingCostUsd = 0.99500;
+      bypassCtx.sandbox.appendRecordInDb_(bypassSs, 'AIUsage', {
+        run_id: 'invalid_date_run',
+        job_id: 'invalid_date_job',
+        provider: 'Google Gemini',
+        model: 'gemini-2.5-flash',
+        operation: 'reconcile',
+        profile_version: '1.0.0',
+        prompt_version: '1.0.0',
+        request_started_at: 'INVALID_TIMESTAMP_2026_XYZ',
+        request_finished_at: '',
+        input_tokens: 1000,
+        output_tokens: 1000,
+        estimated_cost: nearCeilingCostUsd,
+        currency: 'USD',
+        status: 'Completed',
+        error_code: ''
+      });
+
+      // Verify currentSpendUsd includes the row with invalid date
+      const bypassStatus = hostify_(bypassCtx.sandbox.getScoringBudgetStatus());
+      assert.equal(bypassStatus.currentSpendUsd, nearCeilingCostUsd, 'currentSpendUsd must include row with invalid date');
+      assert.equal(bypassStatus.remainingSpendUsd, 0.00500, 'remainingSpendUsd must be $0.00500');
+
+      // Prove budget bypass is prevented: checkAndReserveMonthlyBudgetInDb_ blocks with BUDGET_EXCEEDED
+      // If the row with the invalid date had vanished, spend would be 0 and the reservation would bypass budget.
+      assert.throws(() => {
+        bypassCtx.sandbox.checkAndReserveMonthlyBudgetInDb_(bypassSs, 'bypass_job_1', 'bypass_run_1', '1.0.0');
+      }, (err) => {
+        assert.equal(err.code, 'BUDGET_EXCEEDED', 'checkAndReserveMonthlyBudgetInDb_ must block when invalid-date row brings total to ceiling');
+        return true;
+      });
+
+      // Prove end-to-end scorePendingJobs also halts before dispatch with zero network calls
+      insertSampleJob(bypassCtx);
+      const summary = hostify_(bypassCtx.sandbox.scorePendingJobs(1));
+      assert.equal(summary.failed, 1);
+      assert.equal(summary.stoppedReason, 'BUDGET_EXCEEDED', 'scorePendingJobs must stop with BUDGET_EXCEEDED');
+      assert.equal(bypassCtx.urlFetch.calls.length, 0, 'Zero network calls must be made; budget bypass was prevented');
+
+      // 4. Prove reservation row with absent date is also counted conservatively in target period
+      const resCtx = createContext();
+      const resSs = resCtx.sandbox.getDb_();
+      const reservationCostUsd = 0.00635;
+      const reservationCostUnits = resCtx.sandbox.usdToMonetaryUnits_(reservationCostUsd);
+
+      resCtx.sandbox.appendRecordInDb_(resSs, 'AIUsage', {
+        run_id: 'absent_res_run',
+        job_id: 'absent_res_job',
+        provider: 'Google Gemini',
+        model: 'gemini-2.5-flash',
+        operation: 'score_job',
+        profile_version: '1.0.0',
+        prompt_version: '1.0.0',
+        request_started_at: '',
+        request_finished_at: '',
+        input_tokens: 0,
+        output_tokens: 0,
+        estimated_cost: reservationCostUsd,
+        currency: 'USD',
+        status: 'Reserved',
+        error_code: ''
+      });
+
+      const resRows = resCtx.sandbox.readRows_(resSs, 'AIUsage');
+      const resAgg = hostify_(resCtx.sandbox.aggregateLedgerForPeriod_(resRows, currentYM));
+      assert.equal(resAgg.spendUnits, reservationCostUnits, 'In-flight reservation with absent date must be counted in period spend');
+      assert.equal(resAgg.totalCallsThisMonth, 1, 'In-flight reservation with absent date must be counted in totalCallsThisMonth');
+    });
+
+    it('Test 4: cross-period pairing attributes cost to reconciliation period while preserving attempt count in reservation period', () => {
+      // 1. Initialize context with fakeClock in New York calendar month 2026-01
+      const ctx = createContext({ fakeClock: '2026-01-15T12:00:00Z' });
+      const ss = ctx.sandbox.getDb_();
+
+      const runId = 'cross_period_run_1';
+      const jobId = 'cross_period_job_1';
+
+      // Timestamps chosen to fall into distinct New York calendar months (UTC-5):
+      // Jan 20, 2026 10:00 EST -> 2026-01
+      // Feb 10, 2026 10:00 EST -> 2026-02
+      const resDate = new Date('2026-01-20T15:00:00Z');
+      const recDate = new Date('2026-02-10T15:00:00Z');
+
+      assert.equal(ctx.sandbox.getNewYorkYearMonth_(resDate), '2026-01', 'resDate must resolve to New York 2026-01');
+      assert.equal(ctx.sandbox.getNewYorkYearMonth_(recDate), '2026-02', 'recDate must resolve to New York 2026-02');
+
+      const resCostUsd = 0.00635;
+      const resCostUnits = ctx.sandbox.usdToMonetaryUnits_(resCostUsd); // 635 units
+      const recCostUsd = 0.00051; // 520 in ($0.000156) + 140 out ($0.000350) = 51 units ($0.00051)
+      const recCostUnits = ctx.sandbox.usdToMonetaryUnits_(recCostUsd); // 51 units
+
+      // 2. Append a reservation in New York month 2026-01
+      ctx.sandbox.appendRecordInDb_(ss, 'AIUsage', {
+        run_id: runId,
+        job_id: jobId,
+        provider: 'Google Gemini',
+        model: 'gemini-2.5-flash',
+        operation: 'score_job',
+        profile_version: '1.0.0',
+        prompt_version: '1.0.0',
+        request_started_at: resDate,
+        request_finished_at: '',
+        input_tokens: 0,
+        output_tokens: 0,
+        estimated_cost: resCostUsd,
+        currency: 'USD',
+        status: 'Reserved',
+        error_code: ''
+      });
+
+      // 3. Append its single reconciliation in New York month 2026-02
+      ctx.sandbox.appendRecordInDb_(ss, 'AIUsage', {
+        run_id: runId,
+        job_id: jobId,
+        provider: 'Google Gemini',
+        model: 'gemini-2.5-flash',
+        operation: 'reconcile',
+        profile_version: '1.0.0',
+        prompt_version: '1.0.0',
+        request_started_at: recDate,
+        request_finished_at: new Date('2026-02-10T15:00:02Z'),
+        input_tokens: 520,
+        output_tokens: 140,
+        estimated_cost: recCostUsd,
+        currency: 'USD',
+        status: 'Completed',
+        error_code: ''
+      });
+
+      const usageRows = ctx.sandbox.readRows_(ss, 'AIUsage');
+      assert.equal(usageRows.length, 2, 'Two rows must exist in AIUsage ledger');
+
+      // 4. Low-level aggregation verification for 2026-01:
+      // Single pair across all rows resolved: reconcile replaces reservation for cost,
+      // but because the reconcile row belongs to 2026-02, 2026-01 spend is exactly 0.
+      const aggJan = hostify_(ctx.sandbox.aggregateLedgerForPeriod_(usageRows, '2026-01'));
+      assert.equal(aggJan.spendUnits, 0, '2026-01 spendUnits must be 0 (reconciliation cost attributed to 2026-02)');
+      assert.equal(aggJan.totalCallsThisMonth, 1, '2026-01 totalCallsThisMonth must record the reservation attempt call');
+      assert.equal(aggJan.anomaly, false, 'Single 1:1 reservation+reconciliation pair must not be flagged as anomaly');
+      assert.equal(aggJan.blocked, false, 'Valid cross-period pair must not block ledger');
+
+      // 5. Low-level aggregation verification for 2026-02:
+      // Reconcile row cost is attributed to 2026-02. No new reservation in 2026-02, so totalCallsThisMonth is 0.
+      const aggFeb = hostify_(ctx.sandbox.aggregateLedgerForPeriod_(usageRows, '2026-02'));
+      assert.equal(aggFeb.spendUnits, recCostUnits, '2026-02 spendUnits must equal reconcile cost');
+      assert.equal(aggFeb.totalCallsThisMonth, 0, '2026-02 totalCallsThisMonth must be 0 (attempt belongs to 2026-01)');
+      assert.equal(aggFeb.anomaly, false, 'Single 1:1 reservation+reconciliation pair must not be flagged as anomaly');
+      assert.equal(aggFeb.blocked, false, 'Valid cross-period pair must not block ledger');
+
+      // 6. Anti-double-counting and conservation proofs:
+      // (a) Spend conservation across periods: sum of monthly spend equals reconcile cost exactly once.
+      assert.equal(aggJan.spendUnits + aggFeb.spendUnits, recCostUnits, 'Combined spend across periods must equal reconcile cost');
+      // (b) Reservation placeholder is not charged in either month.
+      assert.notEqual(aggJan.spendUnits, resCostUnits, 'Reservation cost must not be charged in 2026-01');
+      assert.notEqual(aggFeb.spendUnits, resCostUnits, 'Reservation cost must not be charged in 2026-02');
+      // (c) Call conservation across periods: total calls across both months is exactly 1.
+      assert.equal(aggJan.totalCallsThisMonth + aggFeb.totalCallsThisMonth, 1, 'Single attempt must count as exactly 1 call across all periods');
+
+      // 7. High-level budget status verification in 2026-01 (clock at 2026-01-15)
+      const statusJan = hostify_(ctx.sandbox.getScoringBudgetStatus());
+      assert.equal(statusJan.monthlyCeilingUsd, 1.00);
+      assert.equal(statusJan.currentSpendUsd, 0, 'Jan budget status currentSpendUsd must be 0');
+      assert.equal(statusJan.remainingSpendUsd, 1.00, 'Jan budget status remainingSpendUsd must be 1.00');
+      assert.equal(statusJan.totalCallsThisMonth, 1, 'Jan totalCallsThisMonth must be 1');
+
+      // 8. High-level budget status verification in 2026-02 (advance clock to 2026-02-15)
+      ctx.clock.setNow(new Date('2026-02-15T12:00:00Z').getTime());
+      const statusFeb = hostify_(ctx.sandbox.getScoringBudgetStatus());
+      assert.equal(statusFeb.monthlyCeilingUsd, 1.00);
+      assert.equal(statusFeb.currentSpendUsd, recCostUsd, 'Feb budget status currentSpendUsd must be reconcile cost');
+      assert.equal(statusFeb.remainingSpendUsd, (100000 - recCostUnits) / 100000, 'Feb remainingSpendUsd must reflect reconcile cost deduction');
+      assert.equal(statusFeb.totalCallsThisMonth, 0, 'Feb totalCallsThisMonth must be 0');
+
+      // 9. Prove reservations and budget checks in both periods behave correctly:
+      // (a) In 2026-01, full budget is available for reservations
+      ctx.clock.setNow(new Date('2026-01-25T12:00:00Z').getTime());
+      assert.doesNotThrow(() => {
+        ctx.sandbox.checkAndReserveMonthlyBudgetInDb_(ss, 'jan_job_2', 'jan_run_2', '1.0.0');
+      }, 'Reservation in 2026-01 must succeed because 2026-01 spend is 0');
+
+      // (b) In 2026-02, reservation succeeds within remaining budget ($0.99949 remaining)
+      ctx.clock.setNow(new Date('2026-02-20T12:00:00Z').getTime());
+      assert.doesNotThrow(() => {
+        ctx.sandbox.checkAndReserveMonthlyBudgetInDb_(ss, 'feb_job_2', 'feb_run_2', '1.0.0');
+      }, 'Reservation in 2026-02 must succeed within remaining budget');
     });
   });
 });
