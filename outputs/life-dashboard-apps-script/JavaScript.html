@@ -679,6 +679,10 @@
       jobsFilterEl.value = jobsState.filter;
       jobsSortEl.value = jobsState.sort;
 
+      if (jobsState.errorMessage) {
+        container.appendChild(buildStateMessage(jobsState.errorMessage, true));
+      }
+
       var visibleJobs = filteredAndSortedJobs();
       if (visibleJobs.length === 0) {
         var emptyMessage = jobsState.data.activeJobs.length === 0
@@ -772,7 +776,7 @@
       var header = document.createElement('div');
       header.className = 'job-card-header';
       var headingGroup = document.createElement('div');
-      var title = document.createElement('h3');
+      var title = document.createElement('h4');
       title.className = 'job-card-title';
       title.textContent = job.title;
       headingGroup.appendChild(title);
@@ -877,6 +881,7 @@
     function runJobStatusAction(jobId, targetStatus, label) {
       if (jobsState.pending[jobId]) return;
       jobsState.pending[jobId] = true;
+      jobsState.errorMessage = '';
       renderJobsContainer();
       google.script.run
         .withSuccessHandler(function () {
@@ -904,7 +909,7 @@
       var textarea = document.createElement('textarea');
       textarea.id = textareaId;
       textarea.maxLength = 1000;
-      textarea.setAttribute('aria-label', 'Add a note for "' + job.title + '"');
+      textarea.setAttribute('aria-label', 'Add note for "' + job.title + '"');
       var button = document.createElement('button');
       button.type = 'submit';
       button.textContent = 'Save note';
@@ -923,6 +928,7 @@
           return;
         }
         jobsState.pending[job.id] = true;
+        jobsState.errorMessage = '';
         renderJobsContainer();
         google.script.run
           .withSuccessHandler(function () {
@@ -1072,12 +1078,14 @@
                            (typeof result.currentSpendUsd === 'number' && typeof result.monthlyCeilingUsd === 'number' && result.currentSpendUsd >= result.monthlyCeilingUsd);
           if (isExceeded) {
             if (budgetAlertEl) {
+              budgetAlertEl.className = 'state-message is-error';
               budgetAlertEl.textContent = 'Monthly budget limit reached (' + formatUsd(result.remainingSpendUsd) + ' remaining). Scoring is paused.';
               budgetAlertEl.hidden = false;
             }
             if (scoreNextJobBtn) scoreNextJobBtn.disabled = true;
           } else if (typeof result.remainingSpendUsd === 'number' && result.remainingSpendUsd < 1.00) {
             if (budgetAlertEl) {
+              budgetAlertEl.className = 'state-message is-warning';
               budgetAlertEl.textContent = 'Approaching monthly budget limit (' + formatUsd(result.remainingSpendUsd) + ' remaining).';
               budgetAlertEl.hidden = false;
             }
@@ -1093,6 +1101,7 @@
           var msg = (err && err.message) ? err.message : 'The scoring budget status could not be loaded.';
           scoringBudgetState.errorMessage = msg;
           if (budgetAlertEl) {
+            budgetAlertEl.className = 'state-message is-error';
             budgetAlertEl.textContent = 'Scoring budget status unavailable.';
             budgetAlertEl.hidden = false;
           }
