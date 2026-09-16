@@ -131,7 +131,7 @@ describe('createTask', () => {
 
   it('rejects a due date not in yyyy-MM-dd format with no write', () => {
     const ctx = contextWithRows({});
-    ['03/15/2026', '2026-3-15', 'tomorrow', 20260315].forEach((bad) => {
+    ['03/15/2026', '2026-3-15', 'tomorrow', 20260315, '2023/01/01', ' ', 'invalid-date'].forEach((bad) => {
       assert.throws(() => ctx.sandbox.createTask({ id: VALID_ID_1, title: 'X', priority: 'Low', dueDate: bad }), (err) => {
         assert.equal(err.code, 'INVALID_FIELD');
         return true;
