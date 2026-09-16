@@ -10,50 +10,33 @@
  * so it stays out of any push regardless of this comment.
  *
  * It reproduces the same public function surface as the real server
- * (Code.gs / Tasks.gs / Calendar.gs / Jobs.gs): getAppStatus,
- * getDashboardData, createTask, completeTask, reopenTask, archiveTask,
- * getUpcomingEvents, getJobsQueue, setJobStatus, addJobNote, getJobHistory.
- * It intentionally does NOT re-implement every validation rule the real
- * server enforces byte-for-byte — it exists to drive the client's own
- * rendering and state logic for a human looking at a browser, not to
- * replace tests/phase2.test.js (which runs the real Database.gs/Tasks.gs/
- * Calendar.gs code against gas-fakes.js and is the actual correctness
- * check).
+ * (Code.gs / Tasks.gs / Calendar.gs / Jobs.gs / Applications.gs / JobScoring.gs):
+ * getAppStatus, getDashboardData, createTask, completeTask, reopenTask, archiveTask,
+ * getUpcomingEvents, getJobsQueue, setJobStatus, addJobNote, getJobHistory,
+ * getJobScoringState, scorePendingJobs, getScoringBudgetStatus,
+ * createApplication, setApplicationStatus, getApplicationById,
+ * getApplicationsByJobId, getApplicationHistory, updateApplication.
+ *
+ * It tracks per-endpoint call counts in `window.__mockCallCounts` so deterministic
+ * tests can verify zero-call browsing and duplicate-action suppression.
  *
  * Scenario selection via the page's own query string:
  *   ?tasks=empty
- *       start with zero demo tasks (default: three demo tasks, a mix of
- *       Open/Done so both action-button sets are exercised)
  *   ?jobs=unavailable|empty
- *       getDashboardData's job stats come back null, same as a real
- *       missing/mismatched Jobs sheet (default: fixed demo numbers)
  *   ?calendar=ok|empty|unavailable|fail
- *       ok (default): a few upcoming demo events
- *       empty: status 'ok', zero events -- the "nothing in the next 7
- *         days" empty state
- *       unavailable: status 'unavailable' -- a SERVER-REPORTED failure
- *         (e.g. permission or disabled-service problem), delivered
- *         through the normal success handler, exactly like the real
- *         getUpcomingEvents()'s try/catch design
- *       fail: a TRANSPORT failure -- getUpcomingEvents itself fails, so
- *         google.script.run's withFailureHandler fires instead of
- *         withSuccessHandler. This is deliberately a different failure
- *         shape than 'unavailable' so B5 can verify the client handles
- *         both independently.
+ *   ?scoring=unscored|current|stale|quarantined
+ *   ?budget=normal|near-limit|exceeded|ledger-blocked
+ *   ?stoppedReason=RATE_LIMIT|BUDGET_EXCEEDED|AUTH_ERROR|...
+ *   ?apps=empty|conflict|duplicate-active|invalid-transition|history-error
  *   ?latency=500
- *       artificial delay in ms before every call resolves (success or
- *       failure), for exercising loading states and double-submit races
- *   ?fail=createTask,archiveTask
- *   ?fail=createTask:2
- *       make the named function(s) fail their first N calls (default
- *       N=1) via withFailureHandler, then behave normally after that --
- *       lets a manual pass exercise "action fails, retry with the same
- *       request succeeds" without restarting the server or losing state.
+ *   ?fail=createTask,archiveTask:2
  */
 (function () {
   'use strict';
 
-  var params = new URLSearchParams(window.location.search);
+  var params = typeof window !== 'undefined' && window.location && window.location.search
+    ? new URLSearchParams(window.location.search)
+    : new URLSearchParams('');
 
   var latencyMs = Number(params.get('latency')) || 0;
 
@@ -78,6 +61,10 @@
   var calendarMode = params.get('calendar') || 'ok';
   var tasksMode = params.get('tasks') || '';
   var jobsMode = params.get('jobs') || '';
+  var scoringMode = params.get('scoring') || '';
+  var budgetMode = params.get('budget') || 'normal';
+  var stoppedReasonParam = params.get('stoppedReason') || '';
+  var appsMode = params.get('apps') || '';
 
   var TASK_PRIORITIES = ['Low', 'Medium', 'High'];
   var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -90,10 +77,28 @@
     'Reviewed': ['Saved', 'Rejected'],
     'Saved': ['Ready to Apply', 'Rejected'],
     'Ready to Apply': ['Applied', 'Rejected'],
-    'Applied': ['Interview'],
-    'Interview': ['Offer'],
-    'Offer': [],
+    'Applied': ['Interview', 'Rejected'],
+    'Interview': ['Offer', 'Rejected'],
+    'Offer': ['Rejected'],
     'Rejected': ['Reviewed']
+  };
+
+  var APPLICATION_TRANSITIONS = {
+    'Draft': ['Applied', 'Withdrawn'],
+    'Applied': ['Interview', 'Rejected', 'Withdrawn'],
+    'Interview': ['Offered', 'Rejected', 'Withdrawn'],
+    'Offered': ['Rejected', 'Withdrawn'],
+    'Rejected': [],
+    'Withdrawn': []
+  };
+
+  var APP_TO_JOB_STATUS = {
+    'Draft': null,
+    'Applied': 'Applied',
+    'Interview': 'Interview',
+    'Offered': 'Offer',
+    'Rejected': 'Rejected',
+    'Withdrawn': 'Reviewed'
   };
 
   function todayStr() {
@@ -115,15 +120,12 @@
 
   var nextSeq = 1;
   function demoId() {
-    // Fixed-looking but distinct ids for the mock's own bookkeeping only --
-    // never parsed as a real UUID, only compared by reference/equality, so
-    // they don't need to satisfy UUID_PATTERN the way client-submitted ids
-    // do below in createTask().
     return 'demo-task-' + (nextSeq++);
   }
 
   function demoJobId() { return 'demo-job-' + (nextSeq++); }
   function demoHistoryId() { return 'demo-history-' + (nextSeq++); }
+  function demoAppId() { return 'demo-app-' + (nextSeq++); }
 
   var tasks = [];
   if (tasksMode !== 'empty') {
@@ -141,14 +143,12 @@
     return null;
   }
 
-  // These records exist only in this dev-only in-memory adapter. Production
-  // setup never imports this file and never seeds a Jobs sheet.
   var jobs = [];
   var jobHistory = [];
   if (jobsMode !== 'empty') {
     jobs = [
       {
-        id: demoJobId(), title: 'Reporting Analyst', company: 'Demo Labs', location: 'Remote, US',
+        id: 'demo-job-1', title: 'Reporting Analyst', company: 'Demo Labs', location: 'Remote, US',
         remote: true, remoteLabel: 'Remote', salaryMin: 70000, salaryMax: 90000, currency: 'USD',
         postedAt: isoTimestamp(-2), postedDate: isoDateOnly(-2), discoveredAt: isoTimestamp(0),
         discoveredDate: todayStr(), lastSeenAt: isoTimestamp(0), freshness: 'recent',
@@ -157,16 +157,16 @@
         gaps: 'No stated Tableau experience', notes: '', status: 'New', recordVersion: 0
       },
       {
-        id: demoJobId(), title: 'Operations Coordinator', company: 'Demo Works', location: 'New York, NY',
+        id: 'demo-job-2', title: 'Operations Coordinator', company: 'Demo Works', location: 'New York, NY',
         remote: false, remoteLabel: 'Hybrid', salaryMin: 60000, salaryMax: 72000, currency: 'USD',
         postedAt: isoTimestamp(-7), postedDate: isoDateOnly(-7), discoveredAt: isoTimestamp(-3),
         discoveredDate: isoDateOnly(-3), lastSeenAt: isoTimestamp(-1), freshness: 'recent',
         source: 'Demo board', sourceUrl: 'https://jobs.example.org/demo/2', externalId: 'demo-2',
         overallMatch: 88, recommendation: 'Worth reviewing', whyMatches: 'Operations background',
-        gaps: '', notes: '[2026-09-11T12:00:00.000Z] Read job description', status: 'Saved', recordVersion: 2
+        gaps: '', notes: '[2026-09-11T12:00:00.000Z] Read job description', status: 'Ready to Apply', recordVersion: 2
       },
       {
-        id: demoJobId(), title: 'Junior Analyst', company: 'Demo Archive', location: 'Boston, MA',
+        id: 'demo-job-3', title: 'Junior Analyst', company: 'Demo Archive', location: 'Boston, MA',
         remote: false, remoteLabel: 'Not remote', salaryMin: null, salaryMax: null, currency: '',
         postedAt: isoTimestamp(-30), postedDate: isoDateOnly(-30), discoveredAt: isoTimestamp(-20),
         discoveredDate: isoDateOnly(-20), lastSeenAt: isoTimestamp(-16), freshness: 'stale',
@@ -182,14 +182,112 @@
     return null;
   }
 
+  var applications = [];
+  var applicationHistory = [];
+  if (appsMode !== 'empty') {
+    applications = [
+      {
+        id: 'demo-app-1',
+        job_id: 'demo-job-2',
+        status: 'Draft',
+        applied_at: '',
+        follow_up_at: isoDateOnly(2),
+        contact_name: 'Jane Doe',
+        contact_email: 'jane@demoworks.example',
+        interview_at: '',
+        outcome: '',
+        notes: 'Drafting materials.',
+        created_at: isoTimestamp(-2),
+        updated_at: isoTimestamp(-2),
+        record_version: 0
+      }
+    ];
+    applicationHistory = [
+      {
+        id: 'demo-app-hist-1',
+        applicationId: 'demo-app-1',
+        jobId: 'demo-job-2',
+        action: 'create_application',
+        fromStatus: '',
+        toStatus: 'Draft',
+        note: 'Drafting materials.',
+        createdAt: isoTimestamp(-2)
+      }
+    ];
+  }
+
+  function findApplication(id) {
+    for (var i = 0; i < applications.length; i++) {
+      if (applications[i].id === id) return applications[i];
+    }
+    return null;
+  }
+
+  var scoringContext = {
+    profileVersion: '1.0.0',
+    promptVersion: '1.0.0',
+    schemaVersion: '1.0.0',
+    provider: 'Google Gemini',
+    model: 'gemini-2.5-flash'
+  };
+
+  var jobScoringData = {
+    'demo-job-1': {
+      state: 'current',
+      score: {
+        id: 'score-1',
+        overallMatch: 94,
+        recommendation: 'Strong match',
+        evidence: 'Demonstrated experience in SQL and data extraction.',
+        gaps: 'No Tableau experience stated in profile.',
+        validatedAt: isoTimestamp(-1)
+      }
+    },
+    'demo-job-2': {
+      state: 'stale',
+      score: {
+        id: 'score-2',
+        overallMatch: 88,
+        recommendation: 'Worth reviewing',
+        evidence: 'Strong operations coordination experience.',
+        gaps: 'Location requires New York hybrid attendance.',
+        validatedAt: isoTimestamp(-15)
+      }
+    },
+    'demo-job-3': {
+      state: 'unscored',
+      score: null
+    }
+  };
+
+  var budgetStatus = {
+    monthlyCeilingUsd: 10.00,
+    currentSpendUsd: 2.50,
+    remainingSpendUsd: 7.50,
+    totalCallsThisMonth: 15,
+    currency: 'USD'
+  };
+
+  if (budgetMode === 'near-limit') {
+    budgetStatus.currentSpendUsd = 9.20;
+    budgetStatus.remainingSpendUsd = 0.80;
+    budgetStatus.totalCallsThisMonth = 46;
+  } else if (budgetMode === 'exceeded') {
+    budgetStatus.currentSpendUsd = 10.00;
+    budgetStatus.remainingSpendUsd = 0.00;
+    budgetStatus.totalCallsThisMonth = 50;
+  } else if (budgetMode === 'ledger-blocked') {
+    budgetStatus.currentSpendUsd = 3.00;
+    budgetStatus.remainingSpendUsd = 7.00;
+    budgetStatus.totalCallsThisMonth = 15;
+  }
+
   function fail(message, code) {
     var err = new Error(message);
     err.code = code || 'MOCK_ERROR';
     return err;
   }
 
-  // Mirrors Tasks.gs's transitionTask_: idempotent no-op if already at the
-  // target status, otherwise validate the from-status before writing.
   function transition(id, allowedFrom, target, patch) {
     var task = findTask(id);
     if (!task) throw fail('That task no longer exists.', 'NOT_FOUND');
@@ -291,7 +389,7 @@
       }
       var existing = findTask(input.id);
       if (existing) {
-        if (existing.title === title) return existing; // safe same-id/same-title retry
+        if (existing.title === title) return existing;
         throw fail('A different task already uses this id.', 'DUPLICATE_ID');
       }
       var task = { id: input.id, title: title, due_date: dueDate, priority: input.priority, status: 'Open' };
@@ -332,16 +430,355 @@
         }
       ];
       return { status: 'ok', events: events, message: '' };
+    },
+
+    // -----------------------------------------------------------------------
+    // Phase 5 Milestone 2: Scoring & Budget
+    // -----------------------------------------------------------------------
+    getJobScoringState: function (jobId) {
+      var job = findJob(jobId);
+      if (!job) throw fail('Job not found.', 'INVALID_ID');
+      if (scoringMode) {
+        var scoreVal = (scoringMode === 'current' || scoringMode === 'stale')
+          ? {
+              id: 'mock-score-override',
+              overallMatch: 92,
+              recommendation: 'Targeted match',
+              evidence: 'Demonstrated experience in technical delivery.',
+              gaps: 'None noted.',
+              validatedAt: new Date().toISOString()
+            }
+          : null;
+        return {
+          jobId: jobId,
+          state: scoringMode,
+          score: scoreVal,
+          currentContext: scoringContext
+        };
+      }
+      var existing = jobScoringData[jobId];
+      if (existing) {
+        return {
+          jobId: jobId,
+          state: existing.state,
+          score: existing.score,
+          currentContext: scoringContext
+        };
+      }
+      return {
+        jobId: jobId,
+        state: 'unscored',
+        score: null,
+        currentContext: scoringContext
+      };
+    },
+
+    getScoringBudgetStatus: function () {
+      return {
+        monthlyCeilingUsd: budgetStatus.monthlyCeilingUsd,
+        currentSpendUsd: budgetStatus.currentSpendUsd,
+        remainingSpendUsd: budgetStatus.remainingSpendUsd,
+        totalCallsThisMonth: budgetStatus.totalCallsThisMonth,
+        currency: budgetStatus.currency
+      };
+    },
+
+    scorePendingJobs: function (maxCandidates) {
+      void maxCandidates;
+      if (stoppedReasonParam) {
+        return {
+          runId: 'run-' + (nextSeq++),
+          attempted: 1,
+          scored: 0,
+          cached: 0,
+          quarantined: 0,
+          failed: 1,
+          stoppedReason: stoppedReasonParam
+        };
+      }
+      if (budgetMode === 'ledger-blocked') {
+        return {
+          runId: 'run-' + (nextSeq++),
+          attempted: 0,
+          scored: 0,
+          cached: 0,
+          quarantined: 0,
+          failed: 0,
+          stoppedReason: 'LEDGER_INTEGRITY_BLOCKED'
+        };
+      }
+      if (budgetMode === 'exceeded' || budgetStatus.remainingSpendUsd <= 0) {
+        return {
+          runId: 'run-' + (nextSeq++),
+          attempted: 0,
+          scored: 0,
+          cached: 0,
+          quarantined: 0,
+          failed: 0,
+          stoppedReason: 'BUDGET_EXCEEDED'
+        };
+      }
+
+      // Default mock scoring success
+      budgetStatus.currentSpendUsd += 0.05;
+      budgetStatus.remainingSpendUsd = Math.max(0, budgetStatus.monthlyCeilingUsd - budgetStatus.currentSpendUsd);
+      budgetStatus.totalCallsThisMonth += 1;
+
+      // Update demo-job-2 or demo-job-3 to current
+      var targetId = jobScoringData['demo-job-2'] && jobScoringData['demo-job-2'].state === 'stale'
+        ? 'demo-job-2'
+        : (jobs[0] ? jobs[0].id : 'demo-job-1');
+      jobScoringData[targetId] = {
+        state: 'current',
+        score: {
+          id: 'score-' + (nextSeq++),
+          overallMatch: 95,
+          recommendation: 'Strong match',
+          evidence: 'High alignment with profile target role.',
+          gaps: 'No significant gaps.',
+          validatedAt: new Date().toISOString()
+        }
+      };
+
+      return {
+        runId: 'run-' + (nextSeq++),
+        attempted: 1,
+        scored: 1,
+        cached: 0,
+        quarantined: 0,
+        failed: 0
+      };
+    },
+
+    // -----------------------------------------------------------------------
+    // Phase 5 Milestone 1: Application Tracking
+    // -----------------------------------------------------------------------
+    getApplicationsByJobId: function (jobId) {
+      var job = findJob(jobId);
+      if (!job) throw fail('Job not found.', 'INVALID_ID');
+      return applications.filter(function (app) { return app.job_id === jobId; });
+    },
+
+    getApplicationById: function (applicationId) {
+      var app = findApplication(applicationId);
+      if (!app) throw fail('Application not found.', 'NOT_FOUND');
+      return app;
+    },
+
+    createApplication: function (input) {
+      if (!input || typeof input !== 'object') throw fail('Invalid request.', 'INVALID_ARGUMENT');
+      if (typeof input.job_id !== 'string' || !input.job_id.trim()) throw fail('job_id is required.', 'INVALID_ID');
+      var job = findJob(input.job_id);
+      if (!job) throw fail('Job not found.', 'INVALID_ID');
+
+      var allowedKeys = [
+        'id', 'job_id', 'status', 'applied_at', 'follow_up_at',
+        'contact_name', 'contact_email', 'interview_at', 'outcome', 'notes'
+      ];
+      Object.keys(input).forEach(function (k) {
+        if (allowedKeys.indexOf(k) === -1) throw fail('Unknown field: ' + k, 'UNKNOWN_FIELD');
+      });
+
+      if (appsMode === 'duplicate-active') {
+        throw fail('An active application already exists for this job.', 'ACTIVE_APPLICATION_EXISTS');
+      }
+
+      var initialStatus = input.status || 'Draft';
+      if (!APPLICATION_TRANSITIONS[initialStatus]) {
+        throw fail('Invalid application status: ' + initialStatus, 'INVALID_STATUS');
+      }
+
+      // Active status check: Draft, Applied, Interview, Offered are active
+      var activeStatuses = ['Draft', 'Applied', 'Interview', 'Offered'];
+      var hasActive = applications.some(function (app) {
+        return app.job_id === input.job_id && activeStatuses.indexOf(app.status) !== -1;
+      });
+      if (hasActive && activeStatuses.indexOf(initialStatus) !== -1) {
+        throw fail('An active application already exists for this job.', 'ACTIVE_APPLICATION_EXISTS');
+      }
+
+      // Check derived job transition if needed
+      var derivedJob = APP_TO_JOB_STATUS[initialStatus];
+      if (derivedJob && derivedJob !== job.status) {
+        if (!JOB_TRANSITIONS[job.status] || JOB_TRANSITIONS[job.status].indexOf(derivedJob) === -1) {
+          throw fail('The status change would cause an invalid job transition.', 'INVALID_TRANSITION');
+        }
+      }
+
+      var appId = input.id || demoAppId();
+      var nowIso = new Date().toISOString();
+      var newApp = {
+        id: appId,
+        job_id: input.job_id,
+        status: initialStatus,
+        applied_at: input.applied_at || (initialStatus === 'Applied' ? todayStr() : ''),
+        follow_up_at: input.follow_up_at || '',
+        contact_name: input.contact_name || '',
+        contact_email: input.contact_email || '',
+        interview_at: input.interview_at || '',
+        outcome: input.outcome || '',
+        notes: input.notes || '',
+        created_at: nowIso,
+        updated_at: nowIso,
+        record_version: 0
+      };
+
+      applications.push(newApp);
+      applicationHistory.push({
+        id: demoHistoryId(),
+        applicationId: appId,
+        jobId: input.job_id,
+        action: 'create_application',
+        fromStatus: '',
+        toStatus: initialStatus,
+        note: input.notes || '',
+        createdAt: nowIso
+      });
+
+      if (derivedJob && derivedJob !== job.status) {
+        var fromJob = job.status;
+        job.status = derivedJob;
+        job.recordVersion += 1;
+        jobHistory.push({
+          id: demoHistoryId(),
+          jobId: job.id,
+          action: 'sync_from_application',
+          fromStatus: fromJob,
+          toStatus: derivedJob,
+          note: 'Synchronized from application status ' + initialStatus,
+          createdAt: nowIso
+        });
+      }
+
+      return newApp;
+    },
+
+    setApplicationStatus: function (applicationId, targetStatus, note) {
+      if (appsMode === 'conflict') {
+        throw fail('This application changed before the request completed. Refresh and try again.', 'CONFLICT');
+      }
+      var app = findApplication(applicationId);
+      if (!app) throw fail('Application not found.', 'NOT_FOUND');
+      if (!APPLICATION_TRANSITIONS[targetStatus]) {
+        throw fail('Invalid status.', 'INVALID_STATUS');
+      }
+      if (APPLICATION_TRANSITIONS[app.status].indexOf(targetStatus) === -1) {
+        throw fail('That status transition is not allowed.', 'INVALID_TRANSITION');
+      }
+
+      // Check linked job transition
+      var job = findJob(app.job_id);
+      var derivedJob = APP_TO_JOB_STATUS[targetStatus];
+      if (job && derivedJob && derivedJob !== job.status) {
+        if (!JOB_TRANSITIONS[job.status] || JOB_TRANSITIONS[job.status].indexOf(derivedJob) === -1) {
+          throw fail('The status change would cause an invalid job transition.', 'INVALID_TRANSITION');
+        }
+      }
+
+      if (appsMode === 'invalid-transition') {
+        throw fail('Invalid transition.', 'INVALID_TRANSITION');
+      }
+
+      var fromStatus = app.status;
+      app.status = targetStatus;
+      var nowIso = new Date().toISOString();
+      app.updated_at = nowIso;
+      app.record_version += 1;
+      if (targetStatus === 'Applied' && !app.applied_at) {
+        app.applied_at = todayStr();
+      }
+
+      applicationHistory.push({
+        id: demoHistoryId(),
+        applicationId: app.id,
+        jobId: app.job_id,
+        action: 'change_status',
+        fromStatus: fromStatus,
+        toStatus: targetStatus,
+        note: note || '',
+        createdAt: nowIso
+      });
+
+      if (job && derivedJob && derivedJob !== job.status) {
+        var fromJobStatus = job.status;
+        job.status = derivedJob;
+        job.recordVersion += 1;
+        jobHistory.push({
+          id: demoHistoryId(),
+          jobId: job.id,
+          action: 'sync_from_application',
+          fromStatus: fromJobStatus,
+          toStatus: derivedJob,
+          note: note || '',
+          createdAt: nowIso
+        });
+      }
+
+      return app;
+    },
+
+    updateApplication: function (applicationId, updates) {
+      if (appsMode === 'conflict') {
+        throw fail('This application changed before the request completed. Refresh and try again.', 'CONFLICT');
+      }
+      var app = findApplication(applicationId);
+      if (!app) throw fail('Application not found.', 'NOT_FOUND');
+      if (!updates || typeof updates !== 'object') throw fail('Invalid updates.', 'INVALID_RECORD');
+
+      if ('status' in updates || 'id' in updates || 'job_id' in updates) {
+        throw fail('Cannot update status, id, or job_id via updateApplication.', 'FORBIDDEN_FIELD');
+      }
+
+      var allowedKeys = [
+        'contact_name', 'contact_email', 'follow_up_at',
+        'interview_at', 'notes', 'outcome', 'applied_at'
+      ];
+      Object.keys(updates).forEach(function (k) {
+        if (allowedKeys.indexOf(k) === -1) throw fail('Unknown field: ' + k, 'UNKNOWN_FIELD');
+      });
+
+      allowedKeys.forEach(function (k) {
+        if (k in updates) app[k] = updates[k];
+      });
+      app.updated_at = new Date().toISOString();
+      return app;
+    },
+
+    getApplicationHistory: function (applicationId) {
+      if (appsMode === 'history-error') {
+        return {
+          status: 'error',
+          entries: [],
+          quarantinedCount: 0,
+          message: 'Application history is unavailable right now.'
+        };
+      }
+      var entries = applicationHistory
+        .filter(function (e) { return e.applicationId === applicationId; })
+        .slice()
+        .sort(function (a, b) {
+          return b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id);
+        });
+      return {
+        status: 'ok',
+        entries: entries,
+        quarantinedCount: 0,
+        message: ''
+      };
     }
   };
 
+  var mockCallCounts = {};
+  if (typeof window !== 'undefined') {
+    window.__mockCallCounts = mockCallCounts;
+  }
+
   function callMock(fnName, args, onSuccess, onFailure) {
-    // 'calendar=fail' is a transport-level failure for this one function,
-    // independent of the general ?fail= mechanism (which targets any
-    // named function including getUpcomingEvents itself).
+    mockCallCounts[fnName] = (mockCallCounts[fnName] || 0) + 1;
+
     var transportShouldFail = shouldForceFail(fnName) || (fnName === 'getUpcomingEvents' && calendarMode === 'fail');
 
-    window.setTimeout(function () {
+    setTimeout(function () {
       if (transportShouldFail) {
         if (typeof onFailure === 'function') {
           onFailure(fail('Mock transport failure for ' + fnName + '.', 'MOCK_TRANSPORT_FAILURE'));
@@ -349,6 +786,9 @@
         return;
       }
       try {
+        if (!FNS[fnName]) {
+          throw fail('Mock function not implemented: ' + fnName, 'NOT_IMPLEMENTED');
+        }
         var result = FNS[fnName].apply(null, args);
         if (typeof onSuccess === 'function') onSuccess(result);
       } catch (err) {
@@ -371,7 +811,21 @@
     return runner;
   }
 
-  window.google = window.google || {};
-  window.google.script = window.google.script || {};
-  window.google.script.run = makeRunner(null, null);
+  if (typeof window !== 'undefined') {
+    window.google = window.google || {};
+    window.google.script = window.google.script || {};
+    window.google.script.run = makeRunner(null, null);
+    window.__mockFNS = FNS;
+  }
+  if (typeof globalThis !== 'undefined') {
+    globalThis.google = (typeof window !== 'undefined' && window.google) ? window.google : { script: { run: makeRunner(null, null) } };
+    globalThis.__mockCallCounts = mockCallCounts;
+  }
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+      FNS: FNS,
+      mockCallCounts: mockCallCounts,
+      makeRunner: makeRunner
+    };
+  }
 })();

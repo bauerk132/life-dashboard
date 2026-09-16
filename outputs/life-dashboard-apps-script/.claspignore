@@ -16,11 +16,14 @@
 !Tasks.gs
 !Calendar.gs
 !Jobs.gs
+!Applications.gs
 !JobProfile.gs
 !JobSource_JSearch.gs
 !JobFilters.gs
 !JobDedupe.gs
 !Discovery.gs
+!AIProvider_Gemini.gs
+!JobScoring.gs
 !Index.html
 !Styles.html
 !JavaScript.html
