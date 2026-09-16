@@ -33,7 +33,87 @@
     document.querySelectorAll('[data-job-status]').forEach(button => button.addEventListener('click', () => changeJobStatus(button.dataset.id, button.dataset.jobStatus)));
   }
   function jobCard(job) { return `<article class="card job-card"><div class="job-head"><div><h3 class="job-title">${escapeHtml(job.title)}</h3><p class="company">${escapeHtml(job.company)} · ${escapeHtml(job.location)}</p></div><div class="score">${escapeHtml(job.overall_match || '—')}<span>MATCH</span></div></div><div class="pills"><span class="pill">${escapeHtml(job.remote || 'Location unknown')}</span><span class="pill">${formatMoney(job.salary_min,job.salary_max)}</span><span class="pill">${escapeHtml(job.recommendation || 'Unscored')}</span><span class="pill">${escapeHtml(job.status)}</span></div><div class="reason"><div><strong>Why it matches</strong>${escapeHtml(job.why_matches || 'Awaiting scoring')}</div><div><strong>Possible gaps</strong>${escapeHtml(job.gaps || 'None identified')}</div></div><div class="actions"><button class="button" data-id="${job.id}" data-job-status="Reviewed">Reviewed</button><button class="button primary" data-id="${job.id}" data-job-status="Saved">Save</button><button class="button" data-id="${job.id}" data-job-status="Ready to Apply">Ready to apply</button>${job.url ? `<a class="button" href="${escapeHtml(job.url)}" target="_blank" rel="noopener">View job</a>` : ''}<button class="button danger" data-id="${job.id}" data-job-status="Rejected">Reject</button></div></article>`; }
-  function renderTasks() { $('#tasks').innerHTML = `<article class="card"><h2 class="section-title">Tasks</h2><p class="muted">Changes save straight to your Tasks sheet.</p><form class="task-form" id="taskForm"><input class="field" name="title" required placeholder="Add a task"><input class="field" name="dueDate" type="date"><select class="field" name="priority"><option>Medium</option><option>High</option><option>Low</option></select><button class="button primary">Add task</button></form><div>${state.data.tasks.map(taskRow).join('') || '<p class="empty">No tasks yet.</p>'}</div></article>`; $('#taskForm').addEventListener('submit', addTask); document.querySelectorAll('[data-task-id]').forEach(button => button.addEventListener('click', () => changeTaskStatus(button.dataset.taskId, button.dataset.taskStatus))); }
+  function buildTaskRowEl(task) {
+    const done = task.status === 'Done';
+    const row = document.createElement('div');
+    row.className = 'row';
+    const content = document.createElement('div');
+    const titleStrong = document.createElement('strong');
+    titleStrong.className = done ? 'done' : '';
+    titleStrong.textContent = task.title || '';
+    content.appendChild(titleStrong);
+    const meta = document.createElement('div');
+    meta.className = 'muted';
+    meta.textContent = formatDate(task.due_date) + ' · ';
+    const prioSpan = document.createElement('span');
+    prioSpan.className = 'priority ' + (task.priority || '');
+    prioSpan.textContent = task.priority || '';
+    meta.appendChild(prioSpan);
+    content.appendChild(meta);
+    row.appendChild(content);
+    const btn = document.createElement('button');
+    btn.className = 'button';
+    btn.dataset.taskId = task.id;
+    btn.dataset.taskStatus = done ? 'Open' : 'Done';
+    btn.textContent = done ? 'Reopen' : 'Complete';
+    btn.addEventListener('click', () => changeTaskStatus(btn.dataset.taskId, btn.dataset.taskStatus));
+    row.appendChild(btn);
+    return row;
+  }
+  function renderTasks() {
+    const container = $('#tasks');
+    container.textContent = '';
+    const article = document.createElement('article');
+    article.className = 'card';
+    const h2 = document.createElement('h2');
+    h2.className = 'section-title';
+    h2.textContent = 'Tasks';
+    article.appendChild(h2);
+    const p = document.createElement('p');
+    p.className = 'muted';
+    p.textContent = 'Changes save straight to your Tasks sheet.';
+    article.appendChild(p);
+    const form = document.createElement('form');
+    form.className = 'task-form';
+    form.id = 'taskForm';
+    form.addEventListener('submit', addTask);
+    const inputTitle = document.createElement('input');
+    inputTitle.className = 'field';
+    inputTitle.name = 'title';
+    inputTitle.required = true;
+    inputTitle.placeholder = 'Add a task';
+    form.appendChild(inputTitle);
+    const inputDate = document.createElement('input');
+    inputDate.className = 'field';
+    inputDate.name = 'dueDate';
+    inputDate.type = 'date';
+    form.appendChild(inputDate);
+    const selectPriority = document.createElement('select');
+    selectPriority.className = 'field';
+    selectPriority.name = 'priority';
+    ['Medium', 'High', 'Low'].forEach(prio => {
+      const option = document.createElement('option');
+      option.textContent = prio;
+      selectPriority.appendChild(option);
+    });
+    form.appendChild(selectPriority);
+    const btn = document.createElement('button');
+    btn.className = 'button primary';
+    btn.textContent = 'Add task';
+    form.appendChild(btn);
+    article.appendChild(form);
+    const listDiv = document.createElement('div');
+    if (state.data.tasks.length === 0) {
+      const emptyP = document.createElement('p');
+      emptyP.className = 'empty';
+      emptyP.textContent = 'No tasks yet.';
+      listDiv.appendChild(emptyP);
+    } else {
+      state.data.tasks.forEach(task => listDiv.appendChild(buildTaskRowEl(task)));
+    }
+    article.appendChild(listDiv);
+    container.appendChild(article);
+  }
   function taskRow(task) { const done = task.status === 'Done'; return `<div class="row"><div><strong class="${done?'done':''}">${escapeHtml(task.title)}</strong><div class="muted">${formatDate(task.due_date)} · <span class="priority ${escapeHtml(task.priority)}">${escapeHtml(task.priority)}</span></div></div><button class="button" data-task-id="${task.id}" data-task-status="${done?'Open':'Done'}">${done?'Reopen':'Complete'}</button></div>`; }
   async function addTask(event) { event.preventDefault(); const form = new FormData(event.target); await runAction(() => call('createTask',{title:form.get('title'),dueDate:form.get('dueDate'),priority:form.get('priority')}),'Task added.'); }
   async function changeTaskStatus(id,status) { await runAction(() => call('setTaskStatus',id,status), status === 'Done' ? 'Task completed.' : 'Task reopened.'); }
