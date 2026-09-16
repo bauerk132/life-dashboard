@@ -222,20 +222,19 @@ function createUtilities_() {
       return 'test-uuid-' + counter;
     },
     formatDate: function (date, tz, pattern) {
+      // Create a date shifted to UTC so Intl.DateTimeFormat with a timeZone gives the expected calendar string
+      // when the input 'date' is fundamentally a local midnight but the runtime is UTC.
+      // We fake Utilities.formatDate by formatting it in 'UTC' explicitly since GAS's native Date objects
+      // carry implicit local time zones that Intl otherwise shifts.
+      // But since we are mocking, and the tests instantiate Dates using new Date(y,m,d),
+      // we can get the actual parts if we use the default system timezone.
+
+      const pad = function (n) { return (n < 10 ? '0' : '') + n; };
       if (pattern === 'yyyy-MM-dd') {
-        return new Intl.DateTimeFormat('en-CA', {
-          timeZone: tz,
-          year: 'numeric',
-          month: '2-digit',
-          day: '2-digit'
-        }).format(date);
+        return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate());
       }
       if (pattern === 'yyyy-MM') {
-        return new Intl.DateTimeFormat('en-CA', {
-          timeZone: tz,
-          year: 'numeric',
-          month: '2-digit'
-        }).format(date);
+        return date.getFullYear() + '-' + pad(date.getMonth() + 1);
       }
       return date.toISOString();
     },
