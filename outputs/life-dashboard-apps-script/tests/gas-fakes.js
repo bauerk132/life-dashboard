@@ -509,6 +509,8 @@ function loadAppsScriptContext_(options) {
     ? options.scriptProperties
     : { DATABASE_SHEET_ID: sheetId };
   const timeZone = options.timeZone || 'America/New_York';
+  // Ensure Node's Date matches the simulated script timezone to avoid cross-tz shifts.
+  process.env.TZ = timeZone;
   const spreadsheetName = options.spreadsheetName || 'Test Spreadsheet';
   const initialSheets = options.initialSheets || {};
   const files = options.files || ['Database.gs', 'Code.gs'];
