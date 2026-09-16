@@ -66,105 +66,111 @@ const VALID_ID_1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const VALID_ID_2 = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 
 describe('createTask', () => {
-  it('creates a task with a valid id, trimmed title, priority, and Open status', () => {
-    const ctx = contextWithRows({});
-    const result = ctx.sandbox.createTask({ id: VALID_ID_1, title: '  Write cover letter  ', priority: 'High' });
-    assert.equal(result.id, VALID_ID_1);
-    assert.equal(result.title, 'Write cover letter');
-    assert.equal(result.priority, 'High');
-    assert.equal(result.status, 'Open');
-    assert.equal(result.due_date, '');
-    assert.equal(ctx.sheetsByName.Tasks.getLastRow(), 2);
-  });
-
-  it('accepts a valid yyyy-MM-dd due date and stores it as a real Date', () => {
-    const ctx = contextWithRows({});
-    const result = ctx.sandbox.createTask({ id: VALID_ID_1, title: 'Follow up', priority: 'Low', dueDate: '2026-03-15' });
-    assert.equal(result.due_date, '2026-03-15');
-    const dueIndex = ctx.schema.Tasks.indexOf('due_date');
-    const rawRow = ctx.sheetsByName.Tasks.data[1];
-    assert.ok(hostify_(rawRow[dueIndex]) instanceof Date, 'due_date must be stored as a real Date');
-  });
-
-  it('rejects a non-UUID id with no write', () => {
-    const ctx = contextWithRows({});
-    ['not-a-uuid', '', 12345, null, undefined].forEach((bad) => {
-      assert.throws(() => ctx.sandbox.createTask({ id: bad, title: 'X', priority: 'Low' }), (err) => {
-        assert.equal(err.code, 'INVALID_ID');
-        return true;
-      });
+  describe('successful creation', () => {
+    it('creates a task with a valid id, trimmed title, priority, and Open status', () => {
+      const ctx = contextWithRows({});
+      const result = ctx.sandbox.createTask({ id: VALID_ID_1, title: '  Write cover letter  ', priority: 'High' });
+      assert.equal(result.id, VALID_ID_1);
+      assert.equal(result.title, 'Write cover letter');
+      assert.equal(result.priority, 'High');
+      assert.equal(result.status, 'Open');
+      assert.equal(result.due_date, '');
+      assert.equal(ctx.sheetsByName.Tasks.getLastRow(), 2);
     });
-    assert.equal(ctx.sheetsByName.Tasks.getLastRow(), 1, 'header only, no writes');
+
+    it('accepts a valid yyyy-MM-dd due date and stores it as a real Date', () => {
+      const ctx = contextWithRows({});
+      const result = ctx.sandbox.createTask({ id: VALID_ID_1, title: 'Follow up', priority: 'Low', dueDate: '2026-03-15' });
+      assert.equal(result.due_date, '2026-03-15');
+      const dueIndex = ctx.schema.Tasks.indexOf('due_date');
+      const rawRow = ctx.sheetsByName.Tasks.data[1];
+      assert.ok(hostify_(rawRow[dueIndex]) instanceof Date, 'due_date must be stored as a real Date');
+    });
   });
 
-  it('rejects a blank or whitespace-only title with no write', () => {
-    const ctx = contextWithRows({});
-    ['', '   ', undefined, null, 42].forEach((bad) => {
-      assert.throws(() => ctx.sandbox.createTask({ id: VALID_ID_1, title: bad, priority: 'Low' }), (err) => {
+  describe('validation', () => {
+    it('rejects a non-UUID id with no write', () => {
+      const ctx = contextWithRows({});
+      ['not-a-uuid', '', 12345, null, undefined].forEach((bad) => {
+        assert.throws(() => ctx.sandbox.createTask({ id: bad, title: 'X', priority: 'Low' }), (err) => {
+          assert.equal(err.code, 'INVALID_ID');
+          return true;
+        });
+      });
+      assert.equal(ctx.sheetsByName.Tasks.getLastRow(), 1, 'header only, no writes');
+    });
+
+    it('rejects a blank or whitespace-only title with no write', () => {
+      const ctx = contextWithRows({});
+      ['', '   ', undefined, null, 42].forEach((bad) => {
+        assert.throws(() => ctx.sandbox.createTask({ id: VALID_ID_1, title: bad, priority: 'Low' }), (err) => {
+          assert.equal(err.code, 'INVALID_FIELD');
+          return true;
+        });
+      });
+      assert.equal(ctx.sheetsByName.Tasks.getLastRow(), 1);
+    });
+
+    it('rejects a title over 200 characters with no write', () => {
+      const ctx = contextWithRows({});
+      const longTitle = 'x'.repeat(201);
+      assert.throws(() => ctx.sandbox.createTask({ id: VALID_ID_1, title: longTitle, priority: 'Low' }), (err) => {
         assert.equal(err.code, 'INVALID_FIELD');
         return true;
       });
+      assert.equal(ctx.sheetsByName.Tasks.getLastRow(), 1);
     });
-    assert.equal(ctx.sheetsByName.Tasks.getLastRow(), 1);
-  });
 
-  it('rejects a title over 200 characters with no write', () => {
-    const ctx = contextWithRows({});
-    const longTitle = 'x'.repeat(201);
-    assert.throws(() => ctx.sandbox.createTask({ id: VALID_ID_1, title: longTitle, priority: 'Low' }), (err) => {
-      assert.equal(err.code, 'INVALID_FIELD');
-      return true;
+    it('rejects an invalid priority with no write', () => {
+      const ctx = contextWithRows({});
+      ['Urgent', '', undefined, 'low'].forEach((bad) => {
+        assert.throws(() => ctx.sandbox.createTask({ id: VALID_ID_1, title: 'X', priority: bad }), (err) => {
+          assert.equal(err.code, 'INVALID_FIELD');
+          return true;
+        });
+      });
+      assert.equal(ctx.sheetsByName.Tasks.getLastRow(), 1);
     });
-    assert.equal(ctx.sheetsByName.Tasks.getLastRow(), 1);
-  });
 
-  it('rejects an invalid priority with no write', () => {
-    const ctx = contextWithRows({});
-    ['Urgent', '', undefined, 'low'].forEach((bad) => {
-      assert.throws(() => ctx.sandbox.createTask({ id: VALID_ID_1, title: 'X', priority: bad }), (err) => {
+    it('rejects a due date not in yyyy-MM-dd format with no write', () => {
+      const ctx = contextWithRows({});
+      ['03/15/2026', '2026-3-15', 'tomorrow', 20260315].forEach((bad) => {
+        assert.throws(() => ctx.sandbox.createTask({ id: VALID_ID_1, title: 'X', priority: 'Low', dueDate: bad }), (err) => {
+          assert.equal(err.code, 'INVALID_FIELD');
+          return true;
+        });
+      });
+      assert.equal(ctx.sheetsByName.Tasks.getLastRow(), 1);
+    });
+
+    it('rejects a due date that is not a real calendar date (e.g. Feb 30) with no write', () => {
+      const ctx = contextWithRows({});
+      assert.throws(() => ctx.sandbox.createTask({ id: VALID_ID_1, title: 'X', priority: 'Low', dueDate: '2026-02-30' }), (err) => {
         assert.equal(err.code, 'INVALID_FIELD');
         return true;
       });
+      assert.equal(ctx.sheetsByName.Tasks.getLastRow(), 1);
     });
-    assert.equal(ctx.sheetsByName.Tasks.getLastRow(), 1);
   });
 
-  it('rejects a due date not in yyyy-MM-dd format with no write', () => {
-    const ctx = contextWithRows({});
-    ['03/15/2026', '2026-3-15', 'tomorrow', 20260315].forEach((bad) => {
-      assert.throws(() => ctx.sandbox.createTask({ id: VALID_ID_1, title: 'X', priority: 'Low', dueDate: bad }), (err) => {
-        assert.equal(err.code, 'INVALID_FIELD');
+  describe('idempotency and duplicates', () => {
+    it('retrying with the same id and same title returns the existing task, with no duplicate row (idempotent create)', () => {
+      const ctx = contextWithRows({});
+      const first = ctx.sandbox.createTask({ id: VALID_ID_1, title: 'Same task', priority: 'Medium' });
+      const second = ctx.sandbox.createTask({ id: VALID_ID_1, title: 'Same task', priority: 'Medium' });
+      assert.equal(second.id, first.id);
+      assert.equal(ctx.sheetsByName.Tasks.getLastRow(), 2, 'exactly one row, not two');
+    });
+
+    it('retrying with the same id but a different title throws DUPLICATE_ID with no new write', () => {
+      const ctx = contextWithRows({});
+      ctx.sandbox.createTask({ id: VALID_ID_1, title: 'Original title', priority: 'Medium' });
+      assert.throws(() => ctx.sandbox.createTask({ id: VALID_ID_1, title: 'Different title', priority: 'Medium' }), (err) => {
+        assert.equal(err.code, 'DUPLICATE_ID');
         return true;
       });
+      assert.equal(ctx.sheetsByName.Tasks.getLastRow(), 2, 'still exactly one row');
     });
-    assert.equal(ctx.sheetsByName.Tasks.getLastRow(), 1);
-  });
-
-  it('rejects a due date that is not a real calendar date (e.g. Feb 30) with no write', () => {
-    const ctx = contextWithRows({});
-    assert.throws(() => ctx.sandbox.createTask({ id: VALID_ID_1, title: 'X', priority: 'Low', dueDate: '2026-02-30' }), (err) => {
-      assert.equal(err.code, 'INVALID_FIELD');
-      return true;
-    });
-    assert.equal(ctx.sheetsByName.Tasks.getLastRow(), 1);
-  });
-
-  it('retrying with the same id and same title returns the existing task, with no duplicate row (idempotent create)', () => {
-    const ctx = contextWithRows({});
-    const first = ctx.sandbox.createTask({ id: VALID_ID_1, title: 'Same task', priority: 'Medium' });
-    const second = ctx.sandbox.createTask({ id: VALID_ID_1, title: 'Same task', priority: 'Medium' });
-    assert.equal(second.id, first.id);
-    assert.equal(ctx.sheetsByName.Tasks.getLastRow(), 2, 'exactly one row, not two');
-  });
-
-  it('retrying with the same id but a different title throws DUPLICATE_ID with no new write', () => {
-    const ctx = contextWithRows({});
-    ctx.sandbox.createTask({ id: VALID_ID_1, title: 'Original title', priority: 'Medium' });
-    assert.throws(() => ctx.sandbox.createTask({ id: VALID_ID_1, title: 'Different title', priority: 'Medium' }), (err) => {
-      assert.equal(err.code, 'DUPLICATE_ID');
-      return true;
-    });
-    assert.equal(ctx.sheetsByName.Tasks.getLastRow(), 2, 'still exactly one row');
   });
 });
 
