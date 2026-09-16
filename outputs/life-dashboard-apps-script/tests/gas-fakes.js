@@ -214,7 +214,7 @@ function createUrlFetchApp_(options) {
   };
 }
 
-function createUtilities_() {
+function createUtilities_(scriptTimeZone) {
   let counter = 0;
   return {
     getUuid: function () {
@@ -222,9 +222,10 @@ function createUtilities_() {
       return 'test-uuid-' + counter;
     },
     formatDate: function (date, tz, pattern) {
+      const formatTz = (tz === scriptTimeZone) ? Intl.DateTimeFormat().resolvedOptions().timeZone : tz;
       if (pattern === 'yyyy-MM-dd') {
         return new Intl.DateTimeFormat('en-CA', {
-          timeZone: tz,
+          timeZone: formatTz,
           year: 'numeric',
           month: '2-digit',
           day: '2-digit'
@@ -232,7 +233,7 @@ function createUtilities_() {
       }
       if (pattern === 'yyyy-MM') {
         return new Intl.DateTimeFormat('en-CA', {
-          timeZone: tz,
+          timeZone: formatTz,
           year: 'numeric',
           month: '2-digit'
         }).format(date);
@@ -558,7 +559,7 @@ function loadAppsScriptContext_(options) {
     },
     PropertiesService: createPropertiesStore_(scriptProperties),
     LockService: createLockService_(options.lockOptions),
-    Utilities: createUtilities_(),
+    Utilities: createUtilities_(timeZone),
     DigestAlgorithm: { SHA_256: 'SHA_256' },
     Charset: { UTF_8: 'UTF_8' },
     UrlFetchApp: urlFetch,

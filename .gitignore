@@ -1,5 +1,6 @@
 # Local-only work and generated dependencies
 /work/
+/.agents/
 **/node_modules/
 
 # Apps Script deployment links and local secrets

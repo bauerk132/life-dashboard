@@ -34,6 +34,15 @@
     var jobsSortEl = document.getElementById('jobs-sort');
     var jobsRefreshBtn = document.getElementById('jobs-refresh');
 
+    var scoreNextJobBtn = document.getElementById('score-next-job-btn');
+    var scoringBudgetStatusEl = document.getElementById('scoring-budget-status');
+    var budgetCeilingValEl = document.getElementById('budget-ceiling-val');
+    var budgetSpendValEl = document.getElementById('budget-spend-val');
+    var budgetRemainingValEl = document.getElementById('budget-remaining-val');
+    var budgetCallsValEl = document.getElementById('budget-calls-val');
+    var budgetAlertEl = document.getElementById('budget-alert');
+    var scoringRunResultEl = document.getElementById('scoring-run-result');
+
     var addTaskFormEl = document.getElementById('add-task-form');
     var taskTitleInput = document.getElementById('task-title');
     var taskDueDateInput = document.getElementById('task-due-date');
@@ -145,8 +154,13 @@
       // Queue data is deliberately lazy-loaded. Merely opening Home or
       // refreshing Tasks never touches it, and its server endpoint reads
       // stored Sheet rows only — no job-source search or model work occurs.
-      if (name === 'jobs' && jobsState.status === 'not-loaded') {
-        loadJobsQueue(false);
+      if (name === 'jobs') {
+        if (jobsState.status === 'not-loaded') {
+          loadJobsQueue(false);
+        }
+        if (scoringBudgetState.status === 'not-loaded') {
+          loadScoringBudget();
+        }
       }
     }
 
@@ -528,7 +542,18 @@
       filter: 'all',
       sort: 'match',
       pending: {}, // job id -> true while an action or note is in flight
-      histories: {} // job id -> {status, data, errorMessage}
+      histories: {}, // job id -> {status, data, errorMessage}
+      scoringStates: {}, // job id -> {status, data, errorMessage}
+      applications: {}, // job id -> {status, data, errorMessage}
+      appHistories: {}, // app id -> {status, data, errorMessage}
+      appPending: {} // app id or 'new-' + jobId -> true
+    };
+
+    var scoringBudgetState = {
+      status: 'not-loaded', // 'not-loaded' | 'loading' | 'ok' | 'error'
+      data: null,
+      errorMessage: '',
+      scoringPending: false
     };
 
     function loadJobsQueue(isRefresh) {
@@ -560,7 +585,10 @@
       void isRefresh;
     }
 
-    jobsRefreshBtn.addEventListener('click', function () { loadJobsQueue(true); });
+    jobsRefreshBtn.addEventListener('click', function () {
+      loadJobsQueue(true);
+      loadScoringBudget();
+    });
     jobsFilterEl.addEventListener('change', function () {
       jobsState.filter = jobsFilterEl.value;
       renderJobsContainer();
@@ -650,6 +678,10 @@
       jobsControlsEl.hidden = false;
       jobsFilterEl.value = jobsState.filter;
       jobsSortEl.value = jobsState.sort;
+
+      if (jobsState.errorMessage) {
+        container.appendChild(buildStateMessage(jobsState.errorMessage, true));
+      }
 
       var visibleJobs = filteredAndSortedJobs();
       if (visibleJobs.length === 0) {
@@ -744,7 +776,7 @@
       var header = document.createElement('div');
       header.className = 'job-card-header';
       var headingGroup = document.createElement('div');
-      var title = document.createElement('h3');
+      var title = document.createElement('h4');
       title.className = 'job-card-title';
       title.textContent = job.title;
       headingGroup.appendChild(title);
@@ -821,6 +853,8 @@
 
       item.appendChild(buildJobActions(job));
       item.appendChild(buildJobNoteForm(job));
+      item.appendChild(buildJobScoringSection(job));
+      item.appendChild(buildJobApplicationsSection(job));
       item.appendChild(buildJobHistory(job));
       return item;
     }
@@ -847,6 +881,7 @@
     function runJobStatusAction(jobId, targetStatus, label) {
       if (jobsState.pending[jobId]) return;
       jobsState.pending[jobId] = true;
+      jobsState.errorMessage = '';
       renderJobsContainer();
       google.script.run
         .withSuccessHandler(function () {
@@ -874,7 +909,7 @@
       var textarea = document.createElement('textarea');
       textarea.id = textareaId;
       textarea.maxLength = 1000;
-      textarea.setAttribute('aria-label', 'Add a note for "' + job.title + '"');
+      textarea.setAttribute('aria-label', 'Add note for "' + job.title + '"');
       var button = document.createElement('button');
       button.type = 'submit';
       button.textContent = 'Save note';
@@ -893,6 +928,7 @@
           return;
         }
         jobsState.pending[job.id] = true;
+        jobsState.errorMessage = '';
         renderJobsContainer();
         google.script.run
           .withSuccessHandler(function () {
@@ -987,6 +1023,836 @@
         details.appendChild(buildStateMessage(
           state.data.quarantinedCount + ' malformed history record(s) were skipped.', true
         ));
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 5 AI Scoring & Budget controller
+    // ---------------------------------------------------------------------
+    function formatUsd(val) {
+      if (typeof val !== 'number' || !isFinite(val)) return '$0.00';
+      return '$' + val.toFixed(2);
+    }
+
+    function mapStoppedReasonToText(reason) {
+      switch (reason) {
+        case 'AUTH_ERROR':
+          return 'Scoring stopped: Provider authentication error. Please verify your API key configuration.';
+        case 'RATE_LIMIT':
+          return 'Scoring stopped: Provider rate limit reached. Please wait before retrying.';
+        case 'TIMEOUT':
+          return 'Scoring stopped: Scoring request timed out. Please try again.';
+        case 'NETWORK_ERROR':
+          return 'Scoring stopped: Network error while communicating with AI provider.';
+        case 'PROVIDER_UNAVAILABLE':
+          return 'Scoring stopped: AI provider is temporarily unavailable. Please try again later.';
+        case 'USAGE_BOUND_EXCEEDED':
+          return 'Scoring stopped: Model usage safety bound exceeded.';
+        case 'TOKEN_COUNT_UNAVAILABLE':
+          return 'Scoring stopped: Token count could not be determined.';
+        case 'BUDGET_EXCEEDED':
+          return 'Scoring stopped: Monthly scoring budget ceiling reached.';
+        case 'LEDGER_INTEGRITY_BLOCKED':
+          return 'Scoring stopped: Usage ledger integrity check blocked further calls. Requires spreadsheet review.';
+        default:
+          return 'Scoring stopped: Unexpected stop reason received.';
+      }
+    }
+
+    function loadScoringBudget() {
+      if (!scoringBudgetStatusEl) return;
+      scoringBudgetState.status = 'loading';
+      scoringBudgetStatusEl.setAttribute('aria-busy', 'true');
+      google.script.run
+        .withSuccessHandler(function (result) {
+          scoringBudgetState.status = 'ok';
+          scoringBudgetState.data = result;
+          scoringBudgetState.errorMessage = '';
+          scoringBudgetStatusEl.setAttribute('aria-busy', 'false');
+          if (budgetCeilingValEl) budgetCeilingValEl.textContent = formatUsd(result.monthlyCeilingUsd);
+          if (budgetSpendValEl) budgetSpendValEl.textContent = formatUsd(result.currentSpendUsd);
+          if (budgetRemainingValEl) budgetRemainingValEl.textContent = formatUsd(result.remainingSpendUsd);
+          if (budgetCallsValEl) budgetCallsValEl.textContent = String(result.totalCallsThisMonth);
+
+          var isExceeded = (typeof result.remainingSpendUsd === 'number' && result.remainingSpendUsd <= 0) ||
+                           (typeof result.currentSpendUsd === 'number' && typeof result.monthlyCeilingUsd === 'number' && result.currentSpendUsd >= result.monthlyCeilingUsd);
+          if (isExceeded) {
+            if (budgetAlertEl) {
+              budgetAlertEl.className = 'state-message is-error';
+              budgetAlertEl.textContent = 'Monthly budget limit reached (' + formatUsd(result.remainingSpendUsd) + ' remaining). Scoring is paused.';
+              budgetAlertEl.hidden = false;
+            }
+            if (scoreNextJobBtn) scoreNextJobBtn.disabled = true;
+          } else if (typeof result.remainingSpendUsd === 'number' && result.remainingSpendUsd < 1.00) {
+            if (budgetAlertEl) {
+              budgetAlertEl.className = 'state-message is-warning';
+              budgetAlertEl.textContent = 'Approaching monthly budget limit (' + formatUsd(result.remainingSpendUsd) + ' remaining).';
+              budgetAlertEl.hidden = false;
+            }
+            if (scoreNextJobBtn && !scoringBudgetState.scoringPending) scoreNextJobBtn.disabled = false;
+          } else {
+            if (budgetAlertEl) budgetAlertEl.hidden = true;
+            if (scoreNextJobBtn && !scoringBudgetState.scoringPending) scoreNextJobBtn.disabled = false;
+          }
+        })
+        .withFailureHandler(function (err) {
+          scoringBudgetState.status = 'error';
+          scoringBudgetStatusEl.setAttribute('aria-busy', 'false');
+          var msg = (err && err.message) ? err.message : 'The scoring budget status could not be loaded.';
+          scoringBudgetState.errorMessage = msg;
+          if (budgetAlertEl) {
+            budgetAlertEl.className = 'state-message is-error';
+            budgetAlertEl.textContent = 'Scoring budget status unavailable.';
+            budgetAlertEl.hidden = false;
+          }
+        })
+        .getScoringBudgetStatus();
+    }
+
+    function runScoreNextJob() {
+      if (scoringBudgetState.scoringPending) return;
+      scoringBudgetState.scoringPending = true;
+      if (scoreNextJobBtn) scoreNextJobBtn.disabled = true;
+      if (scoringBudgetStatusEl) scoringBudgetStatusEl.setAttribute('aria-busy', 'true');
+      if (scoringRunResultEl) {
+        scoringRunResultEl.className = 'scoring-run-banner';
+        scoringRunResultEl.textContent = 'Scoring next eligible job…';
+        scoringRunResultEl.hidden = false;
+      }
+
+      google.script.run
+        .withSuccessHandler(function (result) {
+          scoringBudgetState.scoringPending = false;
+          if (scoringBudgetStatusEl) scoringBudgetStatusEl.setAttribute('aria-busy', 'false');
+          if (scoreNextJobBtn) scoreNextJobBtn.disabled = false;
+
+          if (scoringRunResultEl) {
+            if (result && result.stoppedReason) {
+              scoringRunResultEl.className = 'scoring-run-banner is-error';
+              var reasonText = mapStoppedReasonToText(result.stoppedReason);
+              var countsText = ' (' + result.attempted + ' attempted, ' + result.scored + ' scored, ' + result.cached + ' cached, ' + result.quarantined + ' quarantined, ' + result.failed + ' failed)';
+              scoringRunResultEl.textContent = reasonText + countsText;
+              announceAlert(reasonText);
+            } else {
+              scoringRunResultEl.className = 'scoring-run-banner';
+              var summaryText = 'Scoring run completed: ' + result.attempted + ' attempted, ' + result.scored + ' scored, ' + result.cached + ' cached, ' + result.quarantined + ' quarantined, ' + result.failed + ' failed.';
+              scoringRunResultEl.textContent = summaryText;
+              announce(summaryText);
+            }
+            scoringRunResultEl.hidden = false;
+          }
+
+          jobsState.scoringStates = {};
+          loadScoringBudget();
+          loadJobsQueue(true);
+        })
+        .withFailureHandler(function (err) {
+          scoringBudgetState.scoringPending = false;
+          if (scoringBudgetStatusEl) scoringBudgetStatusEl.setAttribute('aria-busy', 'false');
+          if (scoreNextJobBtn) scoreNextJobBtn.disabled = false;
+
+          var errorMsg = 'The scoring run could not be completed. Refresh and try again.';
+          if (err && err.code) {
+            if (err.code === 'BUDGET_EXCEEDED') {
+              errorMsg = 'Monthly scoring budget ceiling reached.';
+            } else if (err.code === 'LEDGER_INTEGRITY_BLOCKED') {
+              errorMsg = 'Scoring is blocked by ledger integrity check. Requires spreadsheet review.';
+            } else if (err.code === 'AUTH_ERROR' || err.code === 'MISSING_API_KEY') {
+              errorMsg = 'Authentication error. Please verify API key configuration.';
+            } else if (err.code === 'RATE_LIMIT') {
+              errorMsg = 'Provider rate limit reached. Please wait before retrying.';
+            } else if (err.code === 'TIMEOUT') {
+              errorMsg = 'Scoring request timed out.';
+            } else if (err.code === 'NETWORK_ERROR' || err.code === 'PROVIDER_UNAVAILABLE') {
+              errorMsg = 'Scoring provider is temporarily unavailable.';
+            }
+          }
+          if (scoringRunResultEl) {
+            scoringRunResultEl.className = 'scoring-run-banner is-error';
+            scoringRunResultEl.textContent = errorMsg;
+            scoringRunResultEl.hidden = false;
+          }
+          announceAlert(errorMsg);
+          loadScoringBudget();
+        })
+        .scorePendingJobs(1);
+    }
+
+    if (scoreNextJobBtn) {
+      scoreNextJobBtn.addEventListener('click', runScoreNextJob);
+    }
+
+    // ---------------------------------------------------------------------
+    // Per-job scoring state
+    // ---------------------------------------------------------------------
+    function buildJobScoringSection(job) {
+      var details = document.createElement('details');
+      details.className = 'job-scoring-section';
+      var summary = document.createElement('summary');
+      summary.className = 'job-scoring-summary';
+      summary.textContent = 'AI Match & Scoring';
+      details.appendChild(summary);
+
+      var body = document.createElement('div');
+      body.className = 'job-scoring-body';
+      details.appendChild(body);
+
+      var state = jobsState.scoringStates[job.id];
+      if (state && state.status === 'ok') {
+        renderJobScoringDetails(body, state.data);
+      }
+
+      details.addEventListener('toggle', function () {
+        if (details.open && (!jobsState.scoringStates[job.id] || jobsState.scoringStates[job.id].status === 'not-loaded')) {
+          loadJobScoringState(job.id, body);
+        }
+      });
+
+      return details;
+    }
+
+    function loadJobScoringState(jobId, container) {
+      jobsState.scoringStates[jobId] = { status: 'loading', data: null, errorMessage: '' };
+      clearChildren(container);
+      container.appendChild(buildStateMessage('Loading AI scoring state…', false));
+
+      google.script.run
+        .withSuccessHandler(function (result) {
+          jobsState.scoringStates[jobId] = { status: 'ok', data: result, errorMessage: '' };
+          renderJobScoringDetails(container, result);
+        })
+        .withFailureHandler(function (err) {
+          var msg = (err && err.message) ? err.message : 'AI scoring state is unavailable right now.';
+          jobsState.scoringStates[jobId] = { status: 'error', data: null, errorMessage: msg };
+          clearChildren(container);
+          container.appendChild(buildStateMessage(msg, true));
+          container.appendChild(buildRetryButton(function () { loadJobScoringState(jobId, container); }));
+        })
+        .getJobScoringState(jobId);
+    }
+
+    function renderJobScoringDetails(container, scoringData) {
+      clearChildren(container);
+      if (!scoringData) return;
+
+      var state = scoringData.state;
+      var score = scoringData.score;
+
+      var badge = document.createElement('span');
+      badge.className = 'score-badge is-' + state;
+
+      if (state === 'unscored') {
+        badge.textContent = 'Unscored';
+        container.appendChild(badge);
+        container.appendChild(buildStateMessage('This job has not been evaluated with AI scoring yet.', false));
+      } else if (state === 'current' || state === 'stale') {
+        var matchVal = score && typeof score.overallMatch === 'number' ? score.overallMatch + '%' : 'None';
+        if (state === 'current') {
+          badge.textContent = 'Current · ' + matchVal + ' match';
+        } else {
+          badge.textContent = 'Stale · ' + matchVal + ' match';
+        }
+        container.appendChild(badge);
+
+        if (state === 'stale') {
+          var staleAlert = document.createElement('div');
+          staleAlert.className = 'stale-score-alert';
+          staleAlert.textContent = 'Stale score — target profile, prompt, or model has changed since this job was evaluated. Needs rescoring.';
+          container.appendChild(staleAlert);
+        }
+
+        if (score) {
+          var matchP = document.createElement('p');
+          matchP.className = 'score-explanation-block';
+          var matchStrong = document.createElement('strong');
+          matchStrong.textContent = 'Overall match: ';
+          matchP.appendChild(matchStrong);
+          matchP.appendChild(document.createTextNode(matchVal));
+          container.appendChild(matchP);
+
+          if (score.recommendation) {
+            var recP = document.createElement('p');
+            recP.className = 'score-explanation-block';
+            var recStrong = document.createElement('strong');
+            recStrong.textContent = 'Recommendation: ';
+            recP.appendChild(recStrong);
+            recP.appendChild(document.createTextNode(score.recommendation));
+            container.appendChild(recP);
+          }
+
+          if (score.evidence) {
+            var evP = document.createElement('p');
+            evP.className = 'score-explanation-block';
+            var evStrong = document.createElement('strong');
+            evStrong.textContent = 'Evidence: ';
+            evP.appendChild(evStrong);
+            evP.appendChild(document.createTextNode(score.evidence));
+            container.appendChild(evP);
+          }
+
+          if (score.gaps) {
+            var gapsP = document.createElement('p');
+            gapsP.className = 'score-explanation-block';
+            var gapsStrong = document.createElement('strong');
+            gapsStrong.textContent = 'Gaps: ';
+            gapsP.appendChild(gapsStrong);
+            gapsP.appendChild(document.createTextNode(score.gaps));
+            container.appendChild(gapsP);
+          }
+
+          if (score.validatedAt) {
+            var timeP = document.createElement('p');
+            timeP.className = 'score-explanation-block';
+            var timeStrong = document.createElement('strong');
+            timeStrong.textContent = 'Validated: ';
+            timeP.appendChild(timeStrong);
+            timeP.appendChild(document.createTextNode(formatDateTimeForDisplay(score.validatedAt)));
+            container.appendChild(timeP);
+          }
+        }
+      } else if (state === 'quarantined') {
+        badge.textContent = 'Quarantined';
+        container.appendChild(badge);
+        container.appendChild(buildStateMessage('AI score was quarantined due to validation rules. Record needs rescoring.', false));
+      }
+
+      var disc = document.createElement('p');
+      disc.className = 'score-disclaimer';
+      disc.textContent = 'Deterministic Phase 4 filtering narrowed stored jobs. AI scoring is an automated review aid. The 80%+ match threshold assists review and is not an employment guarantee.';
+      container.appendChild(disc);
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 5 Application Tracking workflow
+    // ---------------------------------------------------------------------
+    var APPLICATION_TRANSITIONS_MAP = {
+      'Draft': ['Applied', 'Withdrawn'],
+      'Applied': ['Interview', 'Rejected', 'Withdrawn'],
+      'Interview': ['Offered', 'Rejected', 'Withdrawn'],
+      'Offered': ['Rejected', 'Withdrawn'],
+      'Rejected': [],
+      'Withdrawn': []
+    };
+
+    function buildJobApplicationsSection(job) {
+      var details = document.createElement('details');
+      details.className = 'job-applications-section';
+      var summary = document.createElement('summary');
+      summary.className = 'job-applications-summary';
+      summary.textContent = 'Application tracking';
+      details.appendChild(summary);
+
+      var body = document.createElement('div');
+      body.className = 'job-applications-body';
+      details.appendChild(body);
+
+      var state = jobsState.applications[job.id];
+      if (state && state.status === 'ok') {
+        renderJobApplications(body, state.data, job);
+      }
+
+      details.addEventListener('toggle', function () {
+        if (details.open && (!jobsState.applications[job.id] || jobsState.applications[job.id].status === 'not-loaded')) {
+          loadJobApplications(job.id, body, job);
+        }
+      });
+
+      return details;
+    }
+
+    function loadJobApplications(jobId, container, job) {
+      jobsState.applications[jobId] = { status: 'loading', data: null, errorMessage: '' };
+      clearChildren(container);
+      container.appendChild(buildStateMessage('Loading applications…', false));
+
+      google.script.run
+        .withSuccessHandler(function (result) {
+          jobsState.applications[jobId] = { status: 'ok', data: result, errorMessage: '' };
+          renderJobApplications(container, result, job);
+        })
+        .withFailureHandler(function (err) {
+          var msg = (err && err.message) ? err.message : 'Applications are unavailable right now.';
+          jobsState.applications[jobId] = { status: 'error', data: null, errorMessage: msg };
+          clearChildren(container);
+          container.appendChild(buildStateMessage(msg, true));
+          container.appendChild(buildRetryButton(function () { loadJobApplications(jobId, container, job); }));
+        })
+        .getApplicationsByJobId(jobId);
+    }
+
+    function renderJobApplications(container, appsList, job) {
+      clearChildren(container);
+      if (!appsList || appsList.length === 0) {
+        container.appendChild(buildStateMessage('No application recorded for this job yet.', false));
+
+        var recordBtn = document.createElement('button');
+        recordBtn.type = 'button';
+        recordBtn.className = 'secondary-button';
+        recordBtn.textContent = 'Record application';
+        var formBox = document.createElement('div');
+        formBox.hidden = true;
+        recordBtn.addEventListener('click', function () {
+          formBox.hidden = !formBox.hidden;
+          recordBtn.textContent = formBox.hidden ? 'Record application' : 'Cancel recording';
+        });
+        container.appendChild(recordBtn);
+        formBox.appendChild(buildCreateApplicationForm(job, container));
+        container.appendChild(formBox);
+        return;
+      }
+
+      appsList.forEach(function (app) {
+        container.appendChild(buildApplicationCard(app, job, container));
+      });
+    }
+
+    function buildCreateApplicationForm(job, parentContainer) {
+      var form = document.createElement('form');
+      form.className = 'app-form';
+
+      var notice = document.createElement('p');
+      notice.className = 'app-notice';
+      notice.textContent = 'Marking Applied records an application you submitted outside this dashboard. This dashboard never submits applications to employers.';
+      form.appendChild(notice);
+
+      var statusField = document.createElement('div');
+      statusField.className = 'field';
+      var statusLabel = document.createElement('label');
+      var statusId = 'app-create-status-' + job.id;
+      statusLabel.setAttribute('for', statusId);
+      statusLabel.textContent = 'Application status';
+      var statusSelect = document.createElement('select');
+      statusSelect.id = statusId;
+      var optDraft = document.createElement('option');
+      optDraft.value = 'Draft';
+      optDraft.textContent = 'Draft (preparing materials)';
+      var optApplied = document.createElement('option');
+      optApplied.value = 'Applied';
+      optApplied.textContent = 'Applied (recorded submission elsewhere)';
+      statusSelect.appendChild(optDraft);
+      statusSelect.appendChild(optApplied);
+      statusField.appendChild(statusLabel);
+      statusField.appendChild(statusSelect);
+      form.appendChild(statusField);
+
+      var appliedDateField = document.createElement('div');
+      appliedDateField.className = 'field';
+      var appliedDateLabel = document.createElement('label');
+      var appliedDateId = 'app-create-applied-date-' + job.id;
+      appliedDateLabel.setAttribute('for', appliedDateId);
+      appliedDateLabel.textContent = 'Applied date';
+      var appliedDateInput = document.createElement('input');
+      appliedDateInput.type = 'date';
+      appliedDateInput.id = appliedDateId;
+      appliedDateField.appendChild(appliedDateLabel);
+      appliedDateField.appendChild(appliedDateInput);
+      form.appendChild(appliedDateField);
+
+      var contactField = document.createElement('div');
+      contactField.className = 'field';
+      var contactLabel = document.createElement('label');
+      var contactId = 'app-create-contact-' + job.id;
+      contactLabel.setAttribute('for', contactId);
+      contactLabel.textContent = 'Contact name';
+      var contactInput = document.createElement('input');
+      contactInput.type = 'text';
+      contactInput.id = contactId;
+      contactInput.maxLength = 100;
+      contactField.appendChild(contactLabel);
+      contactField.appendChild(contactInput);
+      form.appendChild(contactField);
+
+      var emailField = document.createElement('div');
+      emailField.className = 'field';
+      var emailLabel = document.createElement('label');
+      var emailId = 'app-create-email-' + job.id;
+      emailLabel.setAttribute('for', emailId);
+      emailLabel.textContent = 'Contact email';
+      var emailInput = document.createElement('input');
+      emailInput.type = 'email';
+      emailInput.id = emailId;
+      emailInput.maxLength = 150;
+      emailField.appendChild(emailLabel);
+      emailField.appendChild(emailInput);
+      form.appendChild(emailField);
+
+      var notesField = document.createElement('div');
+      notesField.className = 'field';
+      var notesLabel = document.createElement('label');
+      var notesId = 'app-create-notes-' + job.id;
+      notesLabel.setAttribute('for', notesId);
+      notesLabel.textContent = 'Notes';
+      var notesInput = document.createElement('textarea');
+      notesInput.id = notesId;
+      notesInput.maxLength = 1000;
+      notesField.appendChild(notesLabel);
+      notesField.appendChild(notesInput);
+      form.appendChild(notesField);
+
+      var errorP = document.createElement('p');
+      errorP.className = 'state-message is-error';
+      errorP.hidden = true;
+      form.appendChild(errorP);
+
+      var submitBtn = document.createElement('button');
+      submitBtn.type = 'submit';
+      submitBtn.textContent = 'Save application record';
+      form.appendChild(submitBtn);
+
+      form.addEventListener('submit', function (evt) {
+        evt.preventDefault();
+        var pendingKey = 'new-' + job.id;
+        if (jobsState.appPending[pendingKey]) return;
+
+        var input = {
+          job_id: job.id,
+          status: statusSelect.value
+        };
+        if (appliedDateInput.value) input.applied_at = appliedDateInput.value;
+        if (contactInput.value.trim()) input.contact_name = contactInput.value.trim();
+        if (emailInput.value.trim()) input.contact_email = emailInput.value.trim();
+        if (notesInput.value.trim()) input.notes = notesInput.value.trim();
+
+        jobsState.appPending[pendingKey] = true;
+        submitBtn.disabled = true;
+        errorP.hidden = true;
+
+        google.script.run
+          .withSuccessHandler(function () {
+            delete jobsState.appPending[pendingKey];
+            delete jobsState.applications[job.id];
+            announce('Application record saved.');
+            loadJobsQueue(true);
+            loadJobApplications(job.id, parentContainer, job);
+          })
+          .withFailureHandler(function (err) {
+            delete jobsState.appPending[pendingKey];
+            submitBtn.disabled = false;
+            var code = err && err.code ? err.code : '';
+            var msg = 'Could not save application record. Refresh and try again.';
+            if (code === 'ACTIVE_APPLICATION_EXISTS') {
+              msg = 'An active application already exists for this job.';
+            } else if (code === 'INVALID_TRANSITION') {
+              msg = 'This status is not permitted from the job\'s current state.';
+            } else if (code === 'UNKNOWN_FIELD') {
+              msg = 'An unsupported field was rejected by the server.';
+            }
+            errorP.textContent = msg;
+            errorP.hidden = false;
+            announceAlert(msg);
+          })
+          .createApplication(input);
+      });
+
+      return form;
+    }
+
+    function buildApplicationCard(app, job, parentContainer) {
+      var card = document.createElement('div');
+      card.className = 'application-card';
+
+      var header = document.createElement('div');
+      header.className = 'app-header';
+      var title = document.createElement('strong');
+      title.textContent = 'Application Record';
+      header.appendChild(title);
+
+      var badge = document.createElement('span');
+      badge.className = 'app-status-badge app-status-' + app.status;
+      badge.textContent = app.status;
+      header.appendChild(badge);
+      card.appendChild(header);
+
+      var metaList = document.createElement('ul');
+      metaList.className = 'app-meta-list';
+
+      function addMeta(label, val) {
+        var li = document.createElement('li');
+        var str = document.createElement('strong');
+        str.textContent = label + ': ';
+        li.appendChild(str);
+        li.appendChild(document.createTextNode(val));
+        metaList.appendChild(li);
+      }
+
+      addMeta('Status', app.status);
+      addMeta('Applied', app.applied_at ? formatDateOnlyForDisplay(app.applied_at) : 'Not yet applied');
+      if (app.follow_up_at) addMeta('Follow-up', formatDateOnlyForDisplay(app.follow_up_at));
+      if (app.contact_name || app.contact_email) {
+        addMeta('Contact', (app.contact_name || '') + (app.contact_email ? ' (' + app.contact_email + ')' : ''));
+      }
+      if (app.interview_at) addMeta('Interview', formatDateOnlyForDisplay(app.interview_at));
+      if (app.notes) addMeta('Notes', app.notes);
+      if (app.outcome) addMeta('Outcome', app.outcome);
+      card.appendChild(metaList);
+
+      var actions = document.createElement('div');
+      actions.className = 'app-actions';
+      var allowedTargets = APPLICATION_TRANSITIONS_MAP[app.status] || [];
+      var isPending = !!jobsState.appPending[app.id];
+
+      allowedTargets.forEach(function (targetStatus) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.disabled = isPending;
+        if (targetStatus === 'Applied') {
+          btn.textContent = 'Record as applied';
+        } else if (targetStatus === 'Interview') {
+          btn.textContent = 'Record interview';
+        } else if (targetStatus === 'Offered') {
+          btn.textContent = 'Record offer';
+        } else if (targetStatus === 'Rejected') {
+          btn.textContent = 'Record rejection';
+          btn.className = 'is-destructive';
+        } else if (targetStatus === 'Withdrawn') {
+          btn.textContent = 'Withdraw';
+          btn.className = 'is-destructive';
+        } else {
+          btn.textContent = 'Mark ' + targetStatus;
+        }
+
+        btn.setAttribute('aria-label', btn.textContent + ' for application on ' + job.title);
+        btn.addEventListener('click', function () {
+          runApplicationStatusAction(app.id, targetStatus, btn.textContent, job, parentContainer);
+        });
+        actions.appendChild(btn);
+      });
+
+      var editToggleBtn = document.createElement('button');
+      editToggleBtn.type = 'button';
+      editToggleBtn.textContent = 'Edit details';
+      editToggleBtn.disabled = isPending;
+      actions.appendChild(editToggleBtn);
+      card.appendChild(actions);
+
+      var editFormBox = document.createElement('div');
+      editFormBox.hidden = true;
+      editToggleBtn.addEventListener('click', function () {
+        editFormBox.hidden = !editFormBox.hidden;
+        editToggleBtn.textContent = editFormBox.hidden ? 'Edit details' : 'Cancel edit';
+      });
+      editFormBox.appendChild(buildEditApplicationForm(app, job, parentContainer));
+      card.appendChild(editFormBox);
+
+      var historyDetails = document.createElement('details');
+      historyDetails.className = 'app-history-details';
+      var historySummary = document.createElement('summary');
+      historySummary.textContent = 'View application history';
+      historyDetails.appendChild(historySummary);
+
+      var historyBody = document.createElement('div');
+      historyDetails.appendChild(historyBody);
+
+      historyDetails.addEventListener('toggle', function () {
+        if (historyDetails.open && (!jobsState.appHistories[app.id] || jobsState.appHistories[app.id].status === 'not-loaded')) {
+          loadApplicationHistory(app.id, historyBody);
+        }
+      });
+      card.appendChild(historyDetails);
+
+      return card;
+    }
+
+    function runApplicationStatusAction(applicationId, targetStatus, label, job, parentContainer) {
+      if (jobsState.appPending[applicationId]) return;
+      jobsState.appPending[applicationId] = true;
+      renderJobApplications(parentContainer, jobsState.applications[job.id] ? jobsState.applications[job.id].data : [], job);
+
+      google.script.run
+        .withSuccessHandler(function () {
+          delete jobsState.appPending[applicationId];
+          delete jobsState.appHistories[applicationId];
+          delete jobsState.applications[job.id];
+          announce(label + ' recorded.');
+          loadJobsQueue(true);
+          loadJobApplications(job.id, parentContainer, job);
+        })
+        .withFailureHandler(function (err) {
+          delete jobsState.appPending[applicationId];
+          var code = err && err.code ? err.code : '';
+          var msg = 'The status change could not be completed.';
+          if (code === 'CONFLICT') {
+            msg = 'This application changed before the request completed. Refresh and try again.';
+          } else if (code === 'INVALID_TRANSITION') {
+            msg = 'That status transition is not permitted from the current state.';
+          }
+          announceAlert(msg);
+          loadJobApplications(job.id, parentContainer, job);
+        })
+        .setApplicationStatus(applicationId, targetStatus, '');
+    }
+
+    function buildEditApplicationForm(app, job, parentContainer) {
+      var form = document.createElement('form');
+      form.className = 'app-form';
+
+      var contactField = document.createElement('div');
+      contactField.className = 'field';
+      var contactLabel = document.createElement('label');
+      var contactId = 'app-edit-contact-' + app.id;
+      contactLabel.setAttribute('for', contactId);
+      contactLabel.textContent = 'Contact name';
+      var contactInput = document.createElement('input');
+      contactInput.type = 'text';
+      contactInput.id = contactId;
+      contactInput.value = app.contact_name || '';
+      contactInput.maxLength = 100;
+      contactField.appendChild(contactLabel);
+      contactField.appendChild(contactInput);
+      form.appendChild(contactField);
+
+      var emailField = document.createElement('div');
+      emailField.className = 'field';
+      var emailLabel = document.createElement('label');
+      var emailId = 'app-edit-email-' + app.id;
+      emailLabel.setAttribute('for', emailId);
+      emailLabel.textContent = 'Contact email';
+      var emailInput = document.createElement('input');
+      emailInput.type = 'email';
+      emailInput.id = emailId;
+      emailInput.value = app.contact_email || '';
+      emailInput.maxLength = 150;
+      emailField.appendChild(emailLabel);
+      emailField.appendChild(emailInput);
+      form.appendChild(emailField);
+
+      var followUpField = document.createElement('div');
+      followUpField.className = 'field';
+      var followUpLabel = document.createElement('label');
+      var followUpId = 'app-edit-followup-' + app.id;
+      followUpLabel.setAttribute('for', followUpId);
+      followUpLabel.textContent = 'Follow-up date';
+      var followUpInput = document.createElement('input');
+      followUpInput.type = 'date';
+      followUpInput.id = followUpId;
+      followUpInput.value = app.follow_up_at || '';
+      followUpField.appendChild(followUpLabel);
+      followUpField.appendChild(followUpInput);
+      form.appendChild(followUpField);
+
+      var notesField = document.createElement('div');
+      notesField.className = 'field';
+      var notesLabel = document.createElement('label');
+      var notesId = 'app-edit-notes-' + app.id;
+      notesLabel.setAttribute('for', notesId);
+      notesLabel.textContent = 'Notes';
+      var notesInput = document.createElement('textarea');
+      notesInput.id = notesId;
+      notesInput.value = app.notes || '';
+      notesInput.maxLength = 1000;
+      notesField.appendChild(notesLabel);
+      notesField.appendChild(notesInput);
+      form.appendChild(notesField);
+
+      var errorP = document.createElement('p');
+      errorP.className = 'state-message is-error';
+      errorP.hidden = true;
+      form.appendChild(errorP);
+
+      var saveBtn = document.createElement('button');
+      saveBtn.type = 'submit';
+      saveBtn.textContent = 'Save details';
+      form.appendChild(saveBtn);
+
+      form.addEventListener('submit', function (evt) {
+        evt.preventDefault();
+        if (jobsState.appPending[app.id]) return;
+
+        var updates = {
+          contact_name: contactInput.value.trim(),
+          contact_email: emailInput.value.trim(),
+          follow_up_at: followUpInput.value,
+          notes: notesInput.value.trim()
+        };
+
+        jobsState.appPending[app.id] = true;
+        saveBtn.disabled = true;
+        errorP.hidden = true;
+
+        google.script.run
+          .withSuccessHandler(function () {
+            delete jobsState.appPending[app.id];
+            delete jobsState.applications[job.id];
+            announce('Application details updated.');
+            loadJobApplications(job.id, parentContainer, job);
+          })
+          .withFailureHandler(function (err) {
+            delete jobsState.appPending[app.id];
+            saveBtn.disabled = false;
+            var code = err && err.code ? err.code : '';
+            var msg = 'Could not update application details.';
+            if (code === 'CONFLICT') {
+              msg = 'This application changed before the request completed. Refresh and try again.';
+            } else if (code === 'FORBIDDEN_FIELD') {
+              msg = 'Attempted to modify a protected application field.';
+            }
+            errorP.textContent = msg;
+            errorP.hidden = false;
+            announceAlert(msg);
+          })
+          .updateApplication(app.id, updates);
+      });
+
+      return form;
+    }
+
+    function loadApplicationHistory(applicationId, container) {
+      jobsState.appHistories[applicationId] = { status: 'loading', data: null, errorMessage: '' };
+      clearChildren(container);
+      container.appendChild(buildStateMessage('Loading application history…', false));
+
+      google.script.run
+        .withSuccessHandler(function (result) {
+          if (result && result.status === 'ok') {
+            jobsState.appHistories[applicationId] = { status: 'ok', data: result, errorMessage: '' };
+            renderApplicationHistory(container, result);
+          } else {
+            var msg = (result && result.message) ? result.message : 'Application history is unavailable right now.';
+            jobsState.appHistories[applicationId] = { status: 'error', data: null, errorMessage: msg };
+            clearChildren(container);
+            container.appendChild(buildStateMessage(msg, true));
+          }
+        })
+        .withFailureHandler(function (err) {
+          var msg = (err && err.message) ? err.message : 'Application history is unavailable right now.';
+          jobsState.appHistories[applicationId] = { status: 'error', data: null, errorMessage: msg };
+          clearChildren(container);
+          container.appendChild(buildStateMessage(msg, true));
+        })
+        .getApplicationHistory(applicationId);
+    }
+
+    function renderApplicationHistory(container, envelope) {
+      clearChildren(container);
+      if (!envelope.entries || envelope.entries.length === 0) {
+        container.appendChild(buildStateMessage('No recorded application activity yet.', false));
+        return;
+      }
+
+      var ul = document.createElement('ul');
+      ul.className = 'job-history-list';
+      envelope.entries.forEach(function (entry) {
+        var li = document.createElement('li');
+        var p = document.createElement('p');
+        p.textContent = entry.action + (entry.toStatus ? ': → ' + entry.toStatus : '');
+        li.appendChild(p);
+
+        if (entry.note) {
+          var noteP = document.createElement('p');
+          noteP.textContent = entry.note;
+          li.appendChild(noteP);
+        }
+
+        var timeSpan = document.createElement('span');
+        timeSpan.className = 'job-history-time';
+        timeSpan.textContent = formatDateTimeForDisplay(entry.createdAt);
+        li.appendChild(timeSpan);
+        ul.appendChild(li);
+      });
+      container.appendChild(ul);
+
+      if (envelope.quarantinedCount > 0) {
+        container.appendChild(buildStateMessage(envelope.quarantinedCount + ' malformed history record(s) were skipped.', true));
       }
     }
 

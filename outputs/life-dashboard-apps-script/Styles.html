@@ -1,13 +1,54 @@
 <style>
+  /* --- Theme tokens ----------------------------------------------------------
+     One token set drives every surface so color, radius, and elevation stay
+     consistent across Home, Tasks, and Jobs. System fonts only. Text pairs are
+     checked to WCAG AA (>= 4.5:1); field borders and focus rings to >= 3:1. */
   :root {
-    --ink: #172033;
+    /* Neutrals */
+    --ink: #0f172a;
+    --ink-soft: #334155;
     --muted: #475569;
-    --paper: #f6f8fc;
+    --paper: #f3f5f9;
     --card: #fff;
-    --line: #dce3ef;
-    --blue: #2563eb;
+    --surface: #f8fafc;
+    --line: #e2e8f0;
+    --line-strong: #cbd5e1;
+    --field-line: #64748b;
+
+    /* Brand */
+    --navy: #0b1b3f;
+    --navy-2: #13295a;
+    --on-dark-muted: #dbe3f0;
+    --accent: #4f46e5;
+    --accent-hover: #4338ca;
+    --accent-ink: #4338ca;
+    --accent-soft: #eef2ff;
+    --accent-line: #c7d2fe;
+    --accent-bar: #818cf8;
+    --focus: #4f46e5;
+    --focus-on-dark: #a5b4fc;
+
+    /* Status */
     --green: #047857;
+    --green-ink: #065f46;
+    --green-soft: #ecfdf5;
+    --green-line: #a7f3d0;
     --red: #b91c1c;
+    --red-ink: #991b1b;
+    --red-soft: #fef2f2;
+    --red-line: #fecaca;
+    --amber-ink: #92400e;
+    --amber-soft: #fffbeb;
+    --amber-line: #fde68a;
+    --amber-bar: #d97706;
+
+    /* Shape, elevation, layout */
+    --radius: 10px;
+    --radius-lg: 14px;
+    --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
+    --shadow: 0 1px 3px rgba(15, 23, 42, 0.07), 0 6px 16px rgba(15, 23, 42, 0.05);
+    --shadow-hover: 0 2px 6px rgba(15, 23, 42, 0.08), 0 10px 24px rgba(15, 23, 42, 0.07);
+    --content-width: 960px;
   }
 
   * { box-sizing: border-box; }
@@ -16,54 +57,94 @@
 
   body {
     margin: 0;
-    padding: 24px;
+    padding: 0;
     background: var(--paper);
     color: var(--ink);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    line-height: 1.5;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
 
+  ::selection {
+    background: var(--accent-line);
+    color: var(--ink);
+  }
+
+  /* --- App bar ---------------------------------------------------------------
+     Full-bleed navy bar; the inline padding centers its content on the same
+     960px column as <main>, so no wrapper element is needed. */
   header {
-    max-width: 720px;
-    margin: 0 auto;
-    padding: 0 4px;
-  }
-
-  main {
-    max-width: 720px;
-    margin: 0 auto;
-    background: var(--card);
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    padding: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px 24px;
+    padding: 14px max(24px, calc((100% - var(--content-width)) / 2));
+    background: linear-gradient(135deg, var(--navy) 0%, var(--navy-2) 100%);
+    color: #fff;
+    box-shadow: 0 4px 18px rgba(11, 27, 63, 0.18);
   }
 
   h1 {
-    margin-top: 0;
-    font-size: 1.5rem;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0;
+    font-size: 1.125rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: #fff;
+  }
+
+  /* Decorative brand mark: empty content, so assistive tech ignores it. */
+  h1::before {
+    content: "";
+    flex: none;
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, #a5b4fc 0%, #6366f1 55%, #4338ca 100%);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.25);
   }
 
   h2 {
-    font-size: 1.25rem;
-    margin-top: 0;
+    margin: 0 0 6px;
+    font-size: 1.75rem;
+    font-weight: 700;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+    color: var(--ink);
   }
 
   h3 {
-    font-size: 1.05rem;
-    margin-top: 0;
+    margin: 0 0 12px;
+    font-size: 1rem;
+    font-weight: 600;
+    line-height: 1.35;
+    color: var(--ink);
   }
 
   /* h2 is focused programmatically on view switch; outline should still
      show even though it is not the usual tab-stop shape. */
   h2:focus-visible,
   h2:focus {
-    outline: 3px solid var(--blue);
-    outline-offset: 3px;
-    border-radius: 4px;
+    outline: 3px solid var(--focus);
+    outline-offset: 4px;
+    border-radius: 6px;
   }
 
   p {
     color: var(--muted);
+  }
+
+  a {
+    color: var(--accent-ink);
+    text-underline-offset: 3px;
+  }
+
+  a:hover {
+    text-decoration-thickness: 2px;
   }
 
   /* --- Visually-hidden live regions -----------------------------------
@@ -81,135 +162,324 @@
     white-space: nowrap;
   }
 
-  /* --- Nav --------------------------------------------------------------- */
+  /* --- Nav: segmented control on the app bar ------------------------------- */
   nav {
     display: flex;
-    gap: 8px;
-    margin: 12px 0 20px;
     flex-wrap: wrap;
+    gap: 4px;
+    margin: 0;
+    padding: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.07);
   }
 
   .nav-link {
     font: inherit;
+    font-size: 0.9375rem;
     font-weight: 600;
-    color: var(--ink);
-    background: var(--card);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    padding: 10px 16px;
+    color: var(--on-dark-muted);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 9px;
+    padding: 8px 18px;
     min-height: 44px;
     cursor: pointer;
+    transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+  }
+
+  .nav-link:hover {
+    color: #fff;
+    background: rgba(255, 255, 255, 0.1);
   }
 
   .nav-link[aria-current="page"] {
-    background: var(--blue);
-    border-color: var(--blue);
-    color: #fff;
+    background: #fff;
+    border-color: #fff;
+    color: var(--navy);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  }
+
+  /* --- Page column ------------------------------------------------------------ */
+  main {
+    max-width: calc(var(--content-width) + 48px);
+    margin: 0 auto;
+    padding: 32px 24px 56px;
   }
 
   /* --- Cards --------------------------------------------------------------- */
   .card {
+    margin: 20px 0;
+    padding: 20px 24px;
+    background: var(--card);
     border: 1px solid var(--line);
-    border-radius: 10px;
-    padding: 16px;
-    margin: 16px 0;
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow);
+  }
+
+  /* A quiet divider under each card title so panels read as header + body. */
+  .card > h3,
+  .card > .section-heading-row {
+    margin: 0 0 16px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--line);
   }
 
   #connection-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin: 4px 0;
+    padding: 5px 12px 5px 10px;
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    background: var(--card);
+    color: var(--muted);
+    font-size: 0.875rem;
     font-weight: 600;
+  }
+
+  #connection-status::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--field-line);
   }
 
   #connection-status[data-status="ok"] {
     color: var(--green);
+    background: var(--green-soft);
+    border-color: var(--green-line);
+  }
+
+  #connection-status[data-status="ok"]::before {
+    background: var(--green);
   }
 
   #connection-status[data-status="error"] {
     color: var(--red);
+    background: var(--red-soft);
+    border-color: var(--red-line);
+  }
+
+  #connection-status[data-status="error"]::before {
+    background: var(--red);
   }
 
   /* --- Loading / empty / error state blocks ------------------------------- */
   .state-message {
-    color: var(--muted);
     margin: 8px 0;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--muted);
   }
 
   .state-message.is-error {
+    border-color: var(--red-line);
+    border-left: 4px solid var(--red);
+    background: var(--red-soft);
     color: var(--red);
     font-weight: 600;
   }
 
-  .retry-button {
+  .state-message.is-warning {
+    border-color: var(--amber-line);
+    border-left: 4px solid var(--amber-bar);
+    background: var(--amber-soft);
+    color: var(--amber-ink);
+    font-weight: 600;
+  }
+
+  /* --- Buttons: one primary, one secondary, one destructive treatment ------- */
+  .primary-button,
+  #add-task-submit {
     font: inherit;
-    background: var(--card);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    padding: 8px 14px;
+    font-weight: 600;
     min-height: 44px;
+    padding: 10px 18px;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius);
+    background: var(--accent);
+    color: #fff;
+    box-shadow: 0 1px 2px rgba(67, 56, 202, 0.25);
     cursor: pointer;
+    transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+
+  .primary-button:hover:not(:disabled),
+  #add-task-submit:hover:not(:disabled) {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+    box-shadow: 0 2px 8px rgba(67, 56, 202, 0.3);
+  }
+
+  .secondary-button,
+  .retry-button,
+  .task-actions button,
+  .job-actions button,
+  .job-note-form button,
+  .app-actions button,
+  .app-form button {
+    font: inherit;
+    font-size: 0.9375rem;
+    font-weight: 600;
+    min-height: 44px;
+    padding: 8px 14px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    background: var(--card);
+    color: var(--ink-soft);
+    box-shadow: var(--shadow-sm);
+    cursor: pointer;
+    transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  }
+
+  .secondary-button:hover:not(:disabled),
+  .retry-button:hover:not(:disabled),
+  .task-actions button:hover:not(:disabled),
+  .job-actions button:hover:not(:disabled),
+  .job-note-form button:hover:not(:disabled),
+  .app-actions button:hover:not(:disabled),
+  .app-form button:hover:not(:disabled) {
+    background: var(--surface);
+    border-color: var(--field-line);
+    color: var(--ink);
+  }
+
+  .retry-button {
     margin-top: 4px;
+  }
+
+  .task-actions button {
+    min-width: 44px;
+  }
+
+  .job-actions button.is-destructive,
+  .app-actions button.is-destructive {
+    border-color: var(--red);
+    color: var(--red);
+  }
+
+  .job-actions button.is-destructive:hover:not(:disabled),
+  .app-actions button.is-destructive:hover:not(:disabled) {
+    background: var(--red-soft);
+    border-color: var(--red-ink);
+    color: var(--red-ink);
+  }
+
+  .primary-button:disabled,
+  #add-task-submit:disabled,
+  .secondary-button:disabled,
+  .retry-button:disabled,
+  .task-actions button:disabled,
+  .job-actions button:disabled,
+  .job-note-form button:disabled,
+  .app-actions button:disabled,
+  .app-form button:disabled {
+    opacity: 0.55;
+    box-shadow: none;
+    cursor: not-allowed;
   }
 
   /* --- Stats block --------------------------------------------------------- */
   .stats-grid {
     display: grid;
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
     gap: 12px;
-    margin: 12px 0;
+    margin: 0;
     padding: 0;
     list-style: none;
   }
 
-  .stat {
+  .stat,
+  .budget-stat {
+    padding: 14px 16px;
     border: 1px solid var(--line);
-    border-radius: 8px;
-    padding: 10px 12px;
+    border-radius: var(--radius);
+    background: var(--surface);
+    box-shadow: inset 3px 0 0 var(--accent-bar);
   }
 
-  .stat dt {
+  .stat dt,
+  .budget-label {
+    display: block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
     color: var(--muted);
-    font-size: 0.85rem;
   }
 
   .stat dd {
-    margin: 4px 0 0;
-    font-size: 1.4rem;
+    margin: 6px 0 0;
+    font-size: 1.75rem;
     font-weight: 700;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
   }
 
   /* --- Events list ----------------------------------------------------------- */
   .events-list,
   .tasks-list {
+    display: grid;
+    gap: 10px;
     list-style: none;
-    margin: 12px 0 0;
+    margin: 0;
     padding: 0;
   }
 
   .events-list li,
   .tasks-list li {
+    margin: 0;
+    padding: 12px 16px;
     border: 1px solid var(--line);
-    border-radius: 8px;
-    padding: 10px 12px;
-    margin-bottom: 8px;
+    border-radius: var(--radius);
+    background: var(--card);
+  }
+
+  .events-list li {
+    border-left: 4px solid var(--accent-bar);
   }
 
   .event-title {
     font-weight: 600;
+    color: var(--ink);
   }
 
   .event-time {
     display: block;
     color: var(--muted);
-    font-size: 0.9rem;
+    font-size: 0.875rem;
     margin-top: 2px;
+    font-variant-numeric: tabular-nums;
   }
 
   /* --- Task list ------------------------------------------------------------- */
+  .tasks-list li {
+    box-shadow: var(--shadow-sm);
+  }
+
+  .tasks-list li.task-status-done {
+    background: var(--surface);
+    box-shadow: none;
+  }
+
+  /* Progressive enhancement: browsers without :has() skip only this rule. */
+  .tasks-list li:has(.task-meta.is-overdue) {
+    border-left: 4px solid var(--red);
+  }
+
   .task-item {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
-    gap: 8px;
+    gap: 8px 12px;
   }
 
   .task-info {
@@ -218,13 +488,14 @@
 
   .task-title {
     font-weight: 600;
+    color: var(--ink);
     word-break: break-word;
   }
 
   .task-meta {
     display: block;
     color: var(--muted);
-    font-size: 0.9rem;
+    font-size: 0.875rem;
     margin-top: 2px;
   }
 
@@ -244,62 +515,71 @@
     flex-wrap: wrap;
   }
 
-  .task-actions button {
-    font: inherit;
-    background: var(--card);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    padding: 8px 12px;
-    min-height: 44px;
-    min-width: 44px;
-    cursor: pointer;
-  }
-
-  .task-actions button:disabled,
-  .retry-button:disabled,
-  #add-task-submit:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-
-  /* --- Add-task form ----------------------------------------------------------- */
+  /* --- Form fields ------------------------------------------------------------ */
   .field {
-    margin-bottom: 14px;
+    margin-bottom: 16px;
   }
 
-  .field label {
+  .field label,
+  .job-note-form label {
     display: block;
+    margin-bottom: 6px;
+    font-size: 0.875rem;
     font-weight: 600;
-    margin-bottom: 4px;
+    color: var(--ink-soft);
   }
 
   .field input,
-  .field select {
+  .field select,
+  .job-note-form textarea,
+  .app-form textarea {
     font: inherit;
     width: 100%;
     min-height: 44px;
-    padding: 8px 10px;
-    border: 1px solid var(--line);
-    border-radius: 8px;
+    padding: 9px 12px;
+    border: 1px solid var(--field-line);
+    border-radius: var(--radius);
     background: var(--card);
     color: var(--ink);
+    transition: border-color 0.15s ease;
+  }
+
+  .field input:hover,
+  .field select:hover,
+  .job-note-form textarea:hover,
+  .app-form textarea:hover {
+    border-color: var(--ink-soft);
+  }
+
+  .field input:focus,
+  .field select:focus,
+  .job-note-form textarea:focus,
+  .app-form textarea:focus {
+    border-color: var(--accent);
+  }
+
+  /* --- Add-task form: title full width, due date + priority side by side ---- */
+  #add-task-form {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 16px;
+  }
+
+  #add-task-form > h3,
+  #add-task-form > .field:first-of-type,
+  #add-task-form > .state-message,
+  #add-task-submit {
+    grid-column: 1 / -1;
   }
 
   #add-task-submit {
-    font: inherit;
-    font-weight: 600;
-    background: var(--blue);
-    color: #fff;
-    border: 1px solid var(--blue);
-    border-radius: 8px;
-    padding: 10px 18px;
-    min-height: 44px;
-    cursor: pointer;
+    justify-self: start;
   }
 
   /* --- Stored Jobs queue ------------------------------------------------------ */
   .section-intro {
-    margin-top: -8px;
+    margin: 0 0 8px;
+    max-width: 68ch;
   }
 
   .section-heading-row {
@@ -314,25 +594,15 @@
     margin-bottom: 0;
   }
 
-  .secondary-button,
-  .job-actions button,
-  .job-note-form button {
-    font: inherit;
-    font-weight: 600;
-    min-height: 44px;
-    padding: 8px 12px;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: var(--card);
-    color: var(--ink);
-    cursor: pointer;
-  }
-
   .jobs-controls {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 12px;
-    margin-top: 18px;
+    gap: 12px 16px;
+    margin: 0 0 4px;
+    padding: 14px 16px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
   }
 
   .jobs-controls .field {
@@ -346,12 +616,27 @@
     padding: 0;
   }
 
-  .job-card,
-  .job-history-list li {
+  .job-card {
+    margin-bottom: 14px;
+    padding: 18px 20px;
     border: 1px solid var(--line);
-    border-radius: 10px;
-    padding: 14px;
-    margin-bottom: 12px;
+    border-radius: var(--radius-lg);
+    background: var(--card);
+    box-shadow: var(--shadow-sm);
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+
+  .job-card:hover {
+    border-color: var(--line-strong);
+    box-shadow: var(--shadow-hover);
+  }
+
+  .job-history-list li {
+    margin-bottom: 8px;
+    padding: 10px 14px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
   }
 
   .job-card-header {
@@ -363,66 +648,114 @@
 
   .job-card-title {
     margin: 0;
-    font-size: 1.05rem;
+    font-size: 1.0625rem;
+    font-weight: 600;
+    line-height: 1.35;
+    color: var(--ink);
     overflow-wrap: anywhere;
   }
 
   .job-company {
-    margin: 4px 0 0;
+    margin: 2px 0 0;
     color: var(--muted);
-    font-weight: 600;
+    font-size: 0.9375rem;
+    font-weight: 500;
     overflow-wrap: anywhere;
   }
 
+  /* --- Badges: one pill shape, tinted per state ------------------------------ */
   .job-status,
-  .job-freshness {
+  .job-freshness,
+  .score-badge,
+  .app-status-badge {
     display: inline-block;
+    padding: 2px 10px;
+    border: 1px solid transparent;
     border-radius: 999px;
-    padding: 3px 8px;
-    font-size: 0.8rem;
-    font-weight: 700;
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1.6;
+    letter-spacing: 0.01em;
     white-space: nowrap;
   }
 
-  .job-status {
-    background: #dbeafe;
-    color: #1e3a8a;
+  .job-status,
+  .app-status-Interview {
+    background: var(--accent-soft);
+    border-color: var(--accent-line);
+    color: #3730a3;
   }
 
   .job-freshness.is-stale,
-  .job-freshness.is-unknown {
-    background: #fef3c7;
-    color: #854d0e;
+  .job-freshness.is-unknown,
+  .score-badge.is-stale {
+    background: var(--amber-soft);
+    border-color: var(--amber-line);
+    color: var(--amber-ink);
   }
 
-  .job-freshness.is-recent {
-    background: #d1fae5;
-    color: #065f46;
+  .job-freshness.is-recent,
+  .score-badge.is-current,
+  .app-status-Offered {
+    background: var(--green-soft);
+    border-color: var(--green-line);
+    color: var(--green-ink);
+  }
+
+  .score-badge.is-unscored,
+  .app-status-Draft {
+    background: #f1f5f9;
+    border-color: var(--line);
+    color: var(--muted);
+  }
+
+  .score-badge.is-quarantined,
+  .app-status-Rejected {
+    background: var(--red-soft);
+    border-color: var(--red-line);
+    color: var(--red-ink);
+  }
+
+  .app-status-Applied {
+    background: #eff6ff;
+    border-color: #bfdbfe;
+    color: #1e40af;
+  }
+
+  .app-status-Withdrawn {
+    background: #f3f4f6;
+    border-color: #e5e7eb;
+    color: #4b5563;
   }
 
   .job-meta-list {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px 16px;
-    margin: 16px 0 0;
-    padding: 0;
+    gap: 8px 20px;
+    margin: 14px 0 0;
+    padding: 12px 14px;
+    border-radius: var(--radius);
+    background: var(--surface);
     list-style: none;
   }
 
   .job-meta-list li {
     color: var(--muted);
-    font-size: 0.9rem;
+    font-size: 0.875rem;
     overflow-wrap: anywhere;
   }
 
   .job-meta-list strong {
     color: var(--ink);
+    font-weight: 600;
   }
 
   .job-source-link {
-    display: inline-block;
-    margin-top: 12px;
-    color: var(--blue);
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    margin-top: 4px;
+    color: var(--accent-ink);
     font-weight: 600;
   }
 
@@ -430,9 +763,10 @@
     display: grid;
     gap: 10px;
     margin-top: 14px;
-    padding: 12px;
-    border-left: 3px solid var(--line);
-    background: #f8fafc;
+    padding: 12px 14px;
+    border-left: 3px solid var(--accent-bar);
+    border-radius: 0 var(--radius) var(--radius) 0;
+    background: var(--surface);
   }
 
   .job-explanation p,
@@ -448,39 +782,16 @@
     flex-wrap: wrap;
     gap: 8px;
     margin-top: 16px;
-  }
-
-  .job-actions button.is-destructive {
-    border-color: var(--red);
-    color: var(--red);
-  }
-
-  .job-actions button:disabled,
-  .job-note-form button:disabled,
-  .secondary-button:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
+    padding-top: 16px;
+    border-top: 1px solid var(--line);
   }
 
   .job-note-form {
     margin-top: 16px;
   }
 
-  .job-note-form label {
-    display: block;
-    margin-bottom: 4px;
-    font-weight: 600;
-  }
-
   .job-note-form textarea {
-    width: 100%;
     min-height: 88px;
-    padding: 8px 10px;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: var(--card);
-    color: var(--ink);
-    font: inherit;
     resize: vertical;
   }
 
@@ -492,23 +803,199 @@
     margin-top: 16px;
   }
 
-  .job-history summary {
-    color: var(--blue);
+  /* Disclosure summaries share one link-like treatment. */
+  .job-history summary,
+  .job-scoring-summary,
+  .job-applications-summary,
+  .app-history-details summary {
+    padding: 6px 0;
+    color: var(--accent-ink);
     cursor: pointer;
     font-weight: 600;
+  }
+
+  .job-history summary:hover,
+  .job-scoring-summary:hover,
+  .job-applications-summary:hover,
+  .app-history-details summary:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
 
   .job-history-time {
     display: block;
     margin-top: 4px;
     color: var(--muted);
-    font-size: 0.9rem;
+    font-size: 0.875rem;
   }
 
   .job-quarantine {
     margin-top: 16px;
-    border-left: 3px solid #b45309;
-    padding-left: 12px;
+    padding: 10px 14px;
+    border-left: 4px solid var(--amber-bar);
+    border-radius: 0 var(--radius) var(--radius) 0;
+    background: var(--amber-soft);
+  }
+
+  /* --- AI Scoring & Budget Panel ---------------------------------------------- */
+  .scoring-intro {
+    max-width: 72ch;
+    margin: 0 0 16px;
+    font-size: 0.875rem;
+    color: var(--muted);
+  }
+
+  .budget-stats {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .budget-stat strong {
+    display: block;
+    margin-top: 4px;
+    font-size: 1.375rem;
+    font-weight: 700;
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .scoring-run-banner {
+    margin-top: 16px;
+    padding: 12px 14px;
+    border: 1px solid var(--accent-line);
+    border-left: 4px solid var(--accent);
+    border-radius: var(--radius);
+    background: var(--accent-soft);
+    color: #3730a3;
+    font-size: 0.9rem;
+    font-weight: 500;
+  }
+
+  .scoring-run-banner.is-error {
+    border-color: var(--red-line);
+    border-left-color: var(--red);
+    background: var(--red-soft);
+    color: var(--red);
+  }
+
+  /* --- Per-job scoring display ------------------------------------------------ */
+  .job-scoring-section,
+  .job-applications-section {
+    margin-top: 14px;
+    padding-top: 10px;
+    border-top: 1px solid var(--line);
+  }
+
+  .job-scoring-summary,
+  .job-applications-summary {
+    font-size: 0.9375rem;
+  }
+
+  .stale-score-alert {
+    margin: 8px 0;
+    padding: 10px 14px;
+    border: 1px solid var(--amber-line);
+    border-left: 4px solid var(--amber-bar);
+    border-radius: var(--radius);
+    background: var(--amber-soft);
+    color: var(--amber-ink);
+    font-size: 0.875rem;
+  }
+
+  .score-explanation-block {
+    margin: 6px 0;
+    font-size: 0.9rem;
+    color: var(--ink);
+  }
+
+  .score-explanation-block strong {
+    color: var(--ink);
+  }
+
+  .score-disclaimer {
+    margin-top: 8px;
+    font-size: 0.8rem;
+    font-style: italic;
+    color: var(--muted);
+  }
+
+  /* --- Job application tracking ----------------------------------------------- */
+  .application-card {
+    margin-top: 10px;
+    padding: 14px 16px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--card);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .app-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+
+  .app-meta-list {
+    margin: 6px 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .app-meta-list li {
+    margin-bottom: 2px;
+    font-size: 0.875rem;
+    color: var(--muted);
+  }
+
+  .app-meta-list strong {
+    color: var(--ink);
+  }
+
+  .app-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+  }
+
+  .app-form {
+    margin-top: 12px;
+    padding: 14px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+  }
+
+  .app-form .field {
+    margin-bottom: 12px;
+  }
+
+  .app-form textarea {
+    min-height: 72px;
+    resize: vertical;
+  }
+
+  .app-notice {
+    margin: 6px 0 10px;
+    font-size: 0.875rem;
+    color: var(--muted);
+  }
+
+  .app-history-details {
+    margin-top: 10px;
+  }
+
+  .app-history-details summary {
+    font-size: 0.875rem;
   }
 
   /* --- Focus visibility everywhere interactive --------------------------------- */
@@ -516,38 +1003,78 @@
   button:focus-visible,
   input:focus-visible,
   select:focus-visible,
-  textarea:focus-visible {
-    outline: 3px solid var(--blue);
+  textarea:focus-visible,
+  summary:focus-visible {
+    outline: 3px solid var(--focus);
     outline-offset: 2px;
+  }
+
+  /* The app bar is dark, so its controls use a light ring to keep >= 3:1. */
+  .nav-link:focus-visible {
+    outline-color: var(--focus-on-dark);
   }
 
   /* --- Responsive breakpoints -------------------------------------------------- */
   @media (max-width: 720px) {
-    body {
-      padding: 16px;
+    header {
+      padding: 12px 16px;
     }
 
     main {
-      padding: 18px;
+      padding: 24px 16px 40px;
+    }
+
+    h2 {
+      font-size: 1.5rem;
+    }
+
+    .card {
+      padding: 16px;
+    }
+
+    .job-card {
+      padding: 16px;
     }
 
     .stats-grid {
       grid-template-columns: 1fr 1fr;
     }
+
+    .budget-stats {
+      grid-template-columns: 1fr 1fr;
+    }
   }
 
   @media (max-width: 430px) {
-    nav {
+    header {
       flex-direction: column;
+      align-items: stretch;
+    }
+
+    nav {
+      flex-direction: row;
+      flex-wrap: nowrap;
     }
 
     .nav-link {
-      width: 100%;
-      text-align: left;
+      flex: 1 1 0;
+      text-align: center;
+      padding: 8px 10px;
     }
 
-    .stats-grid {
-      grid-template-columns: 1fr;
+    #add-task-form {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .stats-grid,
+    .budget-stats {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .stat,
+    .budget-stat {
+      padding: 12px;
     }
 
     .task-item {
@@ -573,7 +1100,12 @@
     }
 
     .job-actions button,
-    .secondary-button {
+    .secondary-button,
+    .primary-button,
+    .app-actions button,
+    .job-note-form button,
+    .app-form button,
+    #add-task-submit {
       width: 100%;
     }
   }
