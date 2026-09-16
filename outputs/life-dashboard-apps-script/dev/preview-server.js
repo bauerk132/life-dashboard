@@ -49,9 +49,14 @@ function renderIndex() {
   const javascriptHtml = readAppFile('JavaScript.html');
   const mockScript = '<script>\n' + readMock() + '\n</script>\n';
 
+  // Replacer *functions* are used (not strings) because String.replace
+  // treats a string replacement specially: sequences like $&, $`, $', $$
+  // are interpreted as replacement patterns. JavaScript.html's own source
+  // contains "$'" (e.g. `return '$' + val.toFixed(2);` in formatUsd),
+  // which as a plain string replacement corrupts the assembled page.
   return indexHtml
-    .replace("<?!= include('Styles'); ?>", stylesHtml)
-    .replace("<?!= include('JavaScript'); ?>", mockScript + javascriptHtml);
+    .replace("<?!= include('Styles'); ?>", () => stylesHtml)
+    .replace("<?!= include('JavaScript'); ?>", () => mockScript + javascriptHtml);
 }
 
 const server = http.createServer((req, res) => {
