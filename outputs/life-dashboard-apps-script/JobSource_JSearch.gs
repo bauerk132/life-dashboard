@@ -483,6 +483,167 @@ function jsearchComputeContentHash_(source, title, company, location, descriptio
 }
 
 /**
+ * Resolves publisher source and updates dropped counts.
+ *
+ * @param {string} rawPub
+ * @param {Array<string>} enabledPublishers
+ * @param {Object} droppedByPublisher
+ * @returns {string|null} Source string ('linkedin', 'indeed') or null if dropped.
+ */
+function jsearchResolvePublisherSource_(rawPub, enabledPublishers, droppedByPublisher) {
+  const lowerPub = rawPub.toLowerCase();
+  let source = '';
+  if (lowerPub.indexOf('linkedin') !== -1) {
+    source = 'linkedin';
+  } else if (lowerPub.indexOf('indeed') !== -1) {
+    source = 'indeed';
+  } else {
+    if (lowerPub.indexOf('glassdoor') !== -1) {
+      droppedByPublisher.glassdoor += 1;
+    } else if (lowerPub.indexOf('ziprecruiter') !== -1) {
+      droppedByPublisher.ziprecruiter += 1;
+    } else {
+      droppedByPublisher.other += 1;
+    }
+    return null;
+  }
+
+  if (enabledPublishers.indexOf(source) === -1) {
+    if (source === 'indeed') {
+      droppedByPublisher.indeed += 1;
+    } else {
+      droppedByPublisher.other += 1;
+    }
+    return null;
+  }
+
+  return source;
+}
+
+/**
+ * Validates and extracts salary data from a raw job record.
+ *
+ * @param {Object} job
+ * @returns {{ valid: boolean, salaryMin: number|null, salaryMax: number|null, salaryPeriod: string, currency: string, salarySource: string }}
+ */
+function jsearchParseSalary_(job) {
+  let salaryMin = null;
+  let salaryMax = null;
+  let salaryPeriod = '';
+  let hasInvalidSalary = false;
+
+  if (job.job_min_salary !== undefined && job.job_min_salary !== null && job.job_min_salary !== '') {
+    if (typeof job.job_min_salary !== 'number' || !isFinite(job.job_min_salary) || job.job_min_salary <= 0 || job.job_min_salary >= 10000000) {
+      hasInvalidSalary = true;
+    } else {
+      salaryMin = job.job_min_salary;
+    }
+  }
+
+  if (job.job_max_salary !== undefined && job.job_max_salary !== null && job.job_max_salary !== '') {
+    if (typeof job.job_max_salary !== 'number' || !isFinite(job.job_max_salary) || job.job_max_salary <= 0 || job.job_max_salary >= 10000000) {
+      hasInvalidSalary = true;
+    } else {
+      salaryMax = job.job_max_salary;
+    }
+  }
+
+  if (salaryMin !== null && salaryMax !== null && salaryMin > salaryMax) {
+    hasInvalidSalary = true;
+  }
+
+  if (job.job_salary_period !== undefined && job.job_salary_period !== null && job.job_salary_period !== '') {
+    if (typeof job.job_salary_period === 'string' && ['HOUR', 'YEAR', 'MONTH', 'WEEK'].indexOf(job.job_salary_period) !== -1) {
+      salaryPeriod = job.job_salary_period;
+    } else {
+      hasInvalidSalary = true;
+    }
+  }
+
+  if (hasInvalidSalary) {
+    return { valid: false };
+  }
+
+  let currency = '';
+  if (typeof job.job_salary_currency === 'string' && /^[A-Z]{3}$/i.test(job.job_salary_currency.trim())) {
+    currency = job.job_salary_currency.trim().toUpperCase();
+  }
+
+  const salarySource = (salaryMin !== null || salaryMax !== null) ? 'provider' : '';
+
+  return {
+    valid: true,
+    salaryMin: salaryMin,
+    salaryMax: salaryMax,
+    salaryPeriod: salaryPeriod,
+    currency: currency,
+    salarySource: salarySource
+  };
+}
+
+/**
+ * Validates and formats the UTC posted date string from a raw job record.
+ *
+ * @param {*} rawPostedAt
+ * @param {Date} nowDate
+ * @returns {{ valid: boolean, postedAt: string }}
+ */
+function jsearchParsePostedAt_(rawPostedAt, nowDate) {
+  if (rawPostedAt === undefined || rawPostedAt === null || rawPostedAt === '') {
+    return { valid: true, postedAt: '' };
+  }
+  if (typeof rawPostedAt !== 'string') {
+    return { valid: false, postedAt: '' };
+  }
+  const dt = new Date(rawPostedAt);
+  const minDate = new Date('2000-01-01T00:00:00.000Z');
+  const maxDate = new Date(nowDate.getTime() + 2 * 24 * 60 * 60 * 1000);
+  if (isNaN(dt.getTime()) || dt < minDate || dt > maxDate) {
+    return { valid: false, postedAt: '' };
+  }
+  return { valid: true, postedAt: dt.toISOString() };
+}
+
+/**
+ * Extracts and constructs geographic location and remote work details.
+ *
+ * @param {Object} job
+ * @returns {{ latitude: number|null, longitude: number|null, location: string, remote: string }}
+ */
+function jsearchParseLocationAndGeo_(job) {
+  let latitude = null;
+  let longitude = null;
+  if (typeof job.job_latitude === 'number' && isFinite(job.job_latitude) && job.job_latitude >= -90 && job.job_latitude <= 90) {
+    latitude = job.job_latitude;
+  }
+  if (typeof job.job_longitude === 'number' && isFinite(job.job_longitude) && job.job_longitude >= -180 && job.job_longitude <= 180) {
+    longitude = job.job_longitude;
+  }
+
+  const city = jsearchCleanText_(job.job_city || '', 64, false);
+  const state = jsearchCleanText_(job.job_state || '', 64, false);
+  let location = '';
+  if (city && state) {
+    location = city + ', ' + state;
+  } else if (city) {
+    location = city;
+  } else if (state) {
+    location = state;
+  } else if (job.job_is_remote === true) {
+    location = 'Remote';
+  }
+
+  const remote = normalizeRemote_(typeof job.job_is_remote === 'boolean' ? job.job_is_remote : '');
+
+  return {
+    latitude: latitude,
+    longitude: longitude,
+    location: location,
+    remote: remote
+  };
+}
+
+/**
  * Evaluates and normalizes raw job records returned by JSearch.
  *
  * @param {Array<*>} rawJobs
@@ -506,29 +667,8 @@ function jsearchNormalizeJobs_(rawJobs, enabledPublishers, nowDate) {
 
     // Rule 2: Publisher Mapping
     const rawPub = typeof job.job_publisher === 'string' ? job.job_publisher.trim() : '';
-    const lowerPub = rawPub.toLowerCase();
-    let source = '';
-    if (lowerPub.indexOf('linkedin') !== -1) {
-      source = 'linkedin';
-    } else if (lowerPub.indexOf('indeed') !== -1) {
-      source = 'indeed';
-    } else {
-      if (lowerPub.indexOf('glassdoor') !== -1) {
-        droppedByPublisher.glassdoor += 1;
-      } else if (lowerPub.indexOf('ziprecruiter') !== -1) {
-        droppedByPublisher.ziprecruiter += 1;
-      } else {
-        droppedByPublisher.other += 1;
-      }
-      continue;
-    }
-
-    if (enabledPublishers.indexOf(source) === -1) {
-      if (source === 'indeed') {
-        droppedByPublisher.indeed += 1;
-      } else {
-        droppedByPublisher.other += 1;
-      }
+    const source = jsearchResolvePublisherSource_(rawPub, enabledPublishers, droppedByPublisher);
+    if (!source) {
       continue;
     }
 
@@ -577,96 +717,21 @@ function jsearchNormalizeJobs_(rawJobs, enabledPublishers, nowDate) {
     }
 
     // Rule 7: Salary Check
-    let salaryMin = null;
-    let salaryMax = null;
-    let salaryPeriod = '';
-    let hasInvalidSalary = false;
-
-    if (job.job_min_salary !== undefined && job.job_min_salary !== null && job.job_min_salary !== '') {
-      if (typeof job.job_min_salary !== 'number' || !isFinite(job.job_min_salary) || job.job_min_salary <= 0 || job.job_min_salary >= 10000000) {
-        hasInvalidSalary = true;
-      } else {
-        salaryMin = job.job_min_salary;
-      }
-    }
-
-    if (job.job_max_salary !== undefined && job.job_max_salary !== null && job.job_max_salary !== '') {
-      if (typeof job.job_max_salary !== 'number' || !isFinite(job.job_max_salary) || job.job_max_salary <= 0 || job.job_max_salary >= 10000000) {
-        hasInvalidSalary = true;
-      } else {
-        salaryMax = job.job_max_salary;
-      }
-    }
-
-    if (salaryMin !== null && salaryMax !== null && salaryMin > salaryMax) {
-      hasInvalidSalary = true;
-    }
-
-    if (job.job_salary_period !== undefined && job.job_salary_period !== null && job.job_salary_period !== '') {
-      if (typeof job.job_salary_period === 'string' && ['HOUR', 'YEAR', 'MONTH', 'WEEK'].indexOf(job.job_salary_period) !== -1) {
-        salaryPeriod = job.job_salary_period;
-      } else {
-        hasInvalidSalary = true;
-      }
-    }
-
-    if (hasInvalidSalary) {
+    const salaryInfo = jsearchParseSalary_(job);
+    if (!salaryInfo.valid) {
       quarantined.push({ index: idx, reason: 'INVALID_SALARY' });
       continue;
     }
 
     // Rule 8: Posted Date Check
-    let postedAt = '';
-    if (job.job_posted_at_datetime_utc !== undefined && job.job_posted_at_datetime_utc !== null && job.job_posted_at_datetime_utc !== '') {
-      if (typeof job.job_posted_at_datetime_utc !== 'string') {
-        quarantined.push({ index: idx, reason: 'INVALID_POSTED_AT' });
-        continue;
-      }
-      const dt = new Date(job.job_posted_at_datetime_utc);
-      const minDate = new Date('2000-01-01T00:00:00.000Z');
-      const maxDate = new Date(nowDate.getTime() + 2 * 24 * 60 * 60 * 1000);
-      if (isNaN(dt.getTime()) || dt < minDate || dt > maxDate) {
-        quarantined.push({ index: idx, reason: 'INVALID_POSTED_AT' });
-        continue;
-      }
-      postedAt = dt.toISOString();
+    const postedInfo = jsearchParsePostedAt_(job.job_posted_at_datetime_utc, nowDate);
+    if (!postedInfo.valid) {
+      quarantined.push({ index: idx, reason: 'INVALID_POSTED_AT' });
+      continue;
     }
 
     // Rule 9: Coordinates & Location Normalization
-    let latitude = null;
-    let longitude = null;
-    if (typeof job.job_latitude === 'number' && isFinite(job.job_latitude) && job.job_latitude >= -90 && job.job_latitude <= 90) {
-      latitude = job.job_latitude;
-    }
-    if (typeof job.job_longitude === 'number' && isFinite(job.job_longitude) && job.job_longitude >= -180 && job.job_longitude <= 180) {
-      longitude = job.job_longitude;
-    }
-
-    // Location construction
-    const city = jsearchCleanText_(job.job_city || '', 64, false);
-    const state = jsearchCleanText_(job.job_state || '', 64, false);
-    let location = '';
-    if (city && state) {
-      location = city + ', ' + state;
-    } else if (city) {
-      location = city;
-    } else if (state) {
-      location = state;
-    } else if (job.job_is_remote === true) {
-      location = 'Remote';
-    }
-
-    // Remote normalization via Jobs.gs
-    const remote = normalizeRemote_(typeof job.job_is_remote === 'boolean' ? job.job_is_remote : '');
-
-    // Currency
-    let currency = '';
-    if (typeof job.job_salary_currency === 'string' && /^[A-Z]{3}$/i.test(job.job_salary_currency.trim())) {
-      currency = job.job_salary_currency.trim().toUpperCase();
-    }
-
-    // Salary source
-    const salarySource = (salaryMin !== null || salaryMax !== null) ? 'provider' : '';
+    const locationInfo = jsearchParseLocationAndGeo_(job);
 
     // Employment types
     let employmentTypes = [];
@@ -688,7 +753,7 @@ function jsearchNormalizeJobs_(rawJobs, enabledPublishers, nowDate) {
     const description = jsearchCleanText_(job.job_description, JSEARCH_MAX_DESCRIPTION_CHARS_, true);
 
     // Canonical content hash
-    const contentHash = jsearchComputeContentHash_(source, cleanedTitle, cleanedCompany, location, description);
+    const contentHash = jsearchComputeContentHash_(source, cleanedTitle, cleanedCompany, locationInfo.location, description);
 
     candidates.push({
       normalizerVersion: JSEARCH_NORMALIZER_VERSION_,
@@ -698,17 +763,17 @@ function jsearchNormalizeJobs_(rawJobs, enabledPublishers, nowDate) {
       url: canonicalUrl,
       title: cleanedTitle,
       company: cleanedCompany,
-      location: location,
-      remote: remote,
-      salary_min: salaryMin,
-      salary_max: salaryMax,
-      salary_period: salaryPeriod,
-      currency: currency,
-      salary_source: salarySource,
-      posted_at: postedAt,
+      location: locationInfo.location,
+      remote: locationInfo.remote,
+      salary_min: salaryInfo.salaryMin,
+      salary_max: salaryInfo.salaryMax,
+      salary_period: salaryInfo.salaryPeriod,
+      currency: salaryInfo.currency,
+      salary_source: salaryInfo.salarySource,
+      posted_at: postedInfo.postedAt,
       employment_types: employmentTypes,
-      latitude: latitude,
-      longitude: longitude,
+      latitude: locationInfo.latitude,
+      longitude: locationInfo.longitude,
       country: country,
       publisher_raw: publisherRaw,
       description: description,
