@@ -70,5 +70,4 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`Life Dashboard dev preview: http://${HOST}:${PORT}/`);
-  console.log('Scenario query params: ?tasks=empty  ?jobs=unavailable  ?calendar=ok|empty|unavailable|fail  ?latency=500  ?fail=createTask:1');
 });
