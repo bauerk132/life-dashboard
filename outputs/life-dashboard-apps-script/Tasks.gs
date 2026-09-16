@@ -35,7 +35,7 @@ function parseDateOnly_(value, fieldLabel) {
   if (!isValidCalendarDate_(y, m, d)) {
     throw UserError_(fieldLabel + ' is not a real date.', 'INVALID_FIELD');
   }
-  return new Date(y, m - 1, d);
+  return new Date(y, m - 1, d, 12, 0, 0);
 }
 
 function findTaskById_(ss, id) {
