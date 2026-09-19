@@ -871,6 +871,7 @@
         if (action.destructive) button.className = 'is-destructive';
         button.setAttribute('aria-label', action.label + ' for "' + job.title + '"');
         button.addEventListener('click', function () {
+          if (action.destructive && !window.confirm('Are you sure you want to ' + action.label.toLowerCase() + '?')) return;
           runJobStatusAction(job.id, action.target, action.label);
         });
         actions.appendChild(button);
@@ -1613,6 +1614,7 @@
 
         btn.setAttribute('aria-label', btn.textContent + ' for application on ' + job.title);
         btn.addEventListener('click', function () {
+          if (btn.className.includes('is-destructive') && !window.confirm('Are you sure you want to ' + btn.textContent.toLowerCase() + '?')) return;
           runApplicationStatusAction(app.id, targetStatus, btn.textContent, job, parentContainer);
         });
         actions.appendChild(btn);
