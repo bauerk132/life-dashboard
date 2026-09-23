@@ -1,0 +1,3 @@
+## 2026-09-23 - Adding text-based async feedback without custom CSS spinners
+**Learning:** In Google Apps Script and other constrained environments where adding a new custom CSS dependency (like a spinner animation) breaks design constraints, simply changing the button text (e.g. 'Add task' -> 'Adding task…') alongside disabling it provides immediate, effective, and accessible loading feedback without bloating the stylesheet or risking visual inconsistency.
+**Action:** Prioritize text-content state toggles over animated DOM insertions when constrained by zero-new-CSS rules or strict innerHTML bans.
