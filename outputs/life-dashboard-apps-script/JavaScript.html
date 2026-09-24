@@ -461,6 +461,11 @@
       taskDueDateInput.disabled = disabled;
       taskPriorityInput.disabled = disabled;
       addTaskSubmitBtn.disabled = disabled;
+      if (disabled) {
+        addTaskSubmitBtn.textContent = 'Adding task...';
+      } else {
+        addTaskSubmitBtn.textContent = 'Add task';
+      }
     }
 
     function showAddTaskError(message) {
