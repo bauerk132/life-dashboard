@@ -399,7 +399,14 @@ function readRows_(ss, sheetName) {
 
   for (let r = 0; r < values.length; r++) {
     const row = values[r];
-    const isBlank = row.every(function (v) { return v === '' || v === null || v === undefined; });
+    let isBlank = true;
+    for (let c = 0; c < fields.length; c++) {
+      const v = row[c];
+      if (v !== '' && v !== null && v !== undefined) {
+        isBlank = false;
+        break;
+      }
+    }
     if (isBlank) continue;
 
     const obj = {};
@@ -607,7 +614,14 @@ function updateRecordByKeyInDb_(ss, sheetName, keyField, keyValue, updates, prec
     const matches = [];
     for (let i = 0; i < data.length; i++) {
       const row = data[i];
-      const isBlank = row.every(function (v) { return v === '' || v === null || v === undefined; });
+      let isBlank = true;
+      for (let c = 0; c < fields.length; c++) {
+        const v = row[c];
+        if (v !== '' && v !== null && v !== undefined) {
+          isBlank = false;
+          break;
+        }
+      }
       if (isBlank) continue;
       if (String(row[keyIndex]) === normalizedKeyValue) matches.push(i);
     }
