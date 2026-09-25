@@ -161,9 +161,7 @@ function findApplicationByIdOrNull_(ss, id) {
 }
 
 function getActiveApplicationForJob_(ss, jobId) {
-  const apps = readRows_(ss, 'Applications').filter(function (app) {
-    return app.job_id === jobId;
-  });
+  const apps = getApplicationsForJob_(ss, jobId);
   for (let i = 0; i < apps.length; i++) {
     if (ACTIVE_APPLICATION_STATUSES_.indexOf(apps[i].status) !== -1) {
       return apps[i];
@@ -173,9 +171,16 @@ function getActiveApplicationForJob_(ss, jobId) {
 }
 
 function getApplicationsForJob_(ss, jobId) {
-  return readRows_(ss, 'Applications').filter(function (app) {
+  if (typeof globalThis.__APPLICATIONS_CACHE === 'undefined' || !globalThis.__APPLICATIONS_CACHE) {
+    globalThis.__APPLICATIONS_CACHE = readRows_(ss, 'Applications');
+  }
+  return globalThis.__APPLICATIONS_CACHE.filter(function (app) {
     return app.job_id === jobId;
   });
+}
+
+function clearApplicationsCache_() {
+  globalThis.__APPLICATIONS_CACHE = null;
 }
 
 function parseApplicationStoredDate_(value) {
@@ -353,6 +358,7 @@ function createApplication(input) {
       notes: validateApplicationNotes_(input.notes)
     };
 
+    clearApplicationsCache_();
     const stored = appendRecordInDb_(ss, 'Applications', record);
 
     appendRecordInDb_(ss, 'ApplicationHistory', {
@@ -446,6 +452,7 @@ function setApplicationStatus(applicationId, targetStatus, note) {
       appUpdates.applied_at = new Date();
     }
 
+    clearApplicationsCache_();
     const updatedApp = updateRecordByIdInDb_(ss, 'Applications', appId, appUpdates, function (fresh) {
       if (fresh.status !== current.status) {
         throw UserError_('This application changed before the request completed. Refresh and try again.', 'CONFLICT');
@@ -606,6 +613,7 @@ function updateApplication(applicationId, updates) {
       toWrite.applied_at = validateApplicationDate_(updates.applied_at, 'Applied date');
     }
 
+    clearApplicationsCache_();
     const updated = updateRecordByIdInDb_(ss, 'Applications', appId, toWrite, function (fresh) {
       if (fresh.status !== current.status) {
         throw UserError_('This application changed before the request completed. Refresh and try again.', 'CONFLICT');
