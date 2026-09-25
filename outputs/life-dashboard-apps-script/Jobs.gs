@@ -414,8 +414,7 @@ function getJobHistory(jobId) {
     findUniqueJobById_(ss, jobId);
     const entries = [];
     let quarantinedCount = 0;
-    readRows_(ss, 'JobHistory').forEach(function (entry) {
-      if (entry.job_id !== jobId) return;
+    findRowsByKey_(ss, 'JobHistory', 'job_id', jobId).forEach(function (entry) {
       const created = parseStoredDate_(entry.created_at);
       if (!isNonBlankString_(entry.id) || !isNonBlankString_(entry.action) || !created) {
         quarantinedCount += 1;
