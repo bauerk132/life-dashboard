@@ -422,6 +422,56 @@ function readRows_(ss, sheetName) {
 }
 
 /**
+ * Reads every non-blank data row from sheetName that matches the given keyField and keyValue
+ * as plain objects keyed by the schema's field names. Rows that are entirely blank are skipped.
+ * This is an optimized version of readRows_ that filters rows early to avoid expensive object
+ * creation and date parsing for irrelevant rows (e.g. for append-only audit logs like JobHistory).
+ */
+function readRowsByKey_(ss, sheetName, keyField, keyValue) {
+  const sheet = getVerifiedSheet_(ss, sheetName);
+  const fields = SCHEMA[sheetName];
+  const keyIndex = fields.indexOf(keyField);
+
+  if (keyIndex === -1) {
+    throw UserError_('This data set has no ' + keyField + ' column.', 'NO_ID_COLUMN');
+  }
+
+  const dateOnly = DATE_ONLY_FIELDS_[sheetName] || [];
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  const values = sheet.getRange(2, 1, lastRow - 1, fields.length).getValues();
+  const tz = getTimeZone_();
+  const rows = [];
+  const normalizedKeyValue = String(keyValue);
+
+  for (let r = 0; r < values.length; r++) {
+    const row = values[r];
+    const isBlank = row.every(function (v) { return v === '' || v === null || v === undefined; });
+    if (isBlank) continue;
+
+    if (String(row[keyIndex]) !== normalizedKeyValue) continue;
+
+    const obj = {};
+    for (let c = 0; c < fields.length; c++) {
+      const field = fields[c];
+      const raw = row[c];
+      if (isDateValue_(raw)) {
+        obj[field] = dateOnly.indexOf(field) !== -1
+          ? Utilities.formatDate(raw, tz, 'yyyy-MM-dd')
+          : raw.toISOString();
+      } else if (raw === undefined || raw === null) {
+        obj[field] = '';
+      } else {
+        obj[field] = raw;
+      }
+    }
+    rows.push(obj);
+  }
+  return rows;
+}
+
+/**
  * Appends one new record to sheetName. `record` must be a plain object
  * containing only known fields — an unrecognized key throws rather than
  * being silently dropped. `id` is generated when absent/blank; a supplied
