@@ -386,7 +386,7 @@ function initializeDatabase() {
  * sheet, which serialize as yyyy-MM-dd in the script time zone. 0, false,
  * and '' are preserved exactly as stored.
  */
-function readRows_(ss, sheetName) {
+function readRows_(ss, sheetName, rawRowPredicate) {
   const sheet = getVerifiedSheet_(ss, sheetName);
   const fields = SCHEMA[sheetName];
   const dateOnly = DATE_ONLY_FIELDS_[sheetName] || [];
@@ -401,6 +401,8 @@ function readRows_(ss, sheetName) {
     const row = values[r];
     const isBlank = row.every(function (v) { return v === '' || v === null || v === undefined; });
     if (isBlank) continue;
+
+    if (typeof rawRowPredicate === 'function' && !rawRowPredicate(row)) continue;
 
     const obj = {};
     for (let c = 0; c < fields.length; c++) {
