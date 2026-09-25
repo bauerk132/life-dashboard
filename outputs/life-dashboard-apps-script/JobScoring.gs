@@ -348,11 +348,16 @@ function aggregateLedgerForPeriod_(rows, targetYearMonth) {
  * Checks current calendar month usage in AIUsage sheet against the $1.00 USD ceiling.
  * Reserves capacity before any provider network call.
  */
-function checkAndReserveMonthlyBudgetInDb_(ss, jobId, runId, profileVersion) {
-  const usageRows = readRows_(ss, 'AIUsage');
+function checkAndReserveMonthlyBudgetInDb_(ss, jobId, runId, profileVersion, sharedLedger) {
   const now = new Date();
-  const currentYM = getNewYorkYearMonth_(now);
-  const agg = aggregateLedgerForPeriod_(usageRows, currentYM);
+  let agg;
+  if (sharedLedger) {
+    agg = sharedLedger.agg;
+  } else {
+    const usageRows = readRows_(ss, 'AIUsage');
+    const currentYM = getNewYorkYearMonth_(now);
+    agg = aggregateLedgerForPeriod_(usageRows, currentYM);
+  }
 
   if (agg.blocked) {
     throw UserError_(
@@ -388,6 +393,12 @@ function checkAndReserveMonthlyBudgetInDb_(ss, jobId, runId, profileVersion) {
   };
 
   const savedReservation = appendRecordInDb_(ss, 'AIUsage', reservationRecord);
+
+  if (sharedLedger) {
+    sharedLedger.rows.push(savedReservation);
+    sharedLedger.agg = aggregateLedgerForPeriod_(sharedLedger.rows, sharedLedger.currentYM);
+  }
+
   return savedReservation.id;
 }
 
@@ -403,14 +414,14 @@ function checkAndReserveMonthlyBudgetInDb_(ss, jobId, runId, profileVersion) {
  * conservative reconcile can never exceed the reservation already made
  * for this attempt.
  */
-function reconcileUsageInDb_(ss, reservationId, inputTokens, outputTokens, status, errorCode) {
+function reconcileUsageInDb_(ss, reservationId, inputTokens, outputTokens, status, errorCode, sharedLedger) {
   const actualCost = calculateCostUsd_(inputTokens, outputTokens);
   // Get original reservation info
-  const reservations = readRows_(ss, 'AIUsage').filter(r => r.id === reservationId);
+  const reservations = sharedLedger ? sharedLedger.rows.filter(r => r.id === reservationId) : readRows_(ss, 'AIUsage').filter(r => r.id === reservationId);
   const res = reservations.length > 0 ? reservations[0] : {};
 
   // Append new row mapping back to the same run/job ID but marking 'reconcile'
-  return appendRecordInDb_(ss, 'AIUsage', {
+  const savedReconcile = appendRecordInDb_(ss, 'AIUsage', {
     run_id: res.run_id,
     job_id: res.job_id,
     provider: res.provider,
@@ -427,6 +438,13 @@ function reconcileUsageInDb_(ss, reservationId, inputTokens, outputTokens, statu
     status: status,
     error_code: errorCode || ''
   });
+
+  if (sharedLedger) {
+    sharedLedger.rows.push(savedReconcile);
+    sharedLedger.agg = aggregateLedgerForPeriod_(sharedLedger.rows, sharedLedger.currentYM);
+  }
+
+  return savedReconcile;
 }
 
 /**
@@ -609,9 +627,10 @@ function validateScoringOutput_(parsed, groundingDescription) {
  * @param {Spreadsheet} ss - Active spreadsheet handle.
  * @param {Object} job - Job record from Jobs sheet.
  * @param {string} runId - Run identifier.
+ * @param {Object} [sharedLedger] - Optional ledger cache.
  * @returns {Object} { status: 'scored' | 'cached' | 'quarantined', scoreId }
  */
-function scoreSingleJobInDb_(ss, job, runId) {
+function scoreSingleJobInDb_(ss, job, runId, sharedLedger) {
   const profile = typeof JOB_PROFILE_ !== 'undefined' ? JOB_PROFILE_ : { configVersion: 1 };
   const profileVersion = (profile && profile.configVersion) ? profile.configVersion.toString() : '1.0.0';
   const descHash = computeJobDescriptionHash_(job.description);
@@ -647,8 +666,8 @@ function scoreSingleJobInDb_(ss, job, runId) {
 
   // Step 2: read-only budget pre-check. If blocked, zero network calls and
   // zero ledger writes happen for this candidate.
-  const currentYM = getNewYorkYearMonth_(new Date());
-  const preCheck = aggregateLedgerForPeriod_(readRows_(ss, 'AIUsage'), currentYM);
+  const currentYM = sharedLedger ? sharedLedger.currentYM : getNewYorkYearMonth_(new Date());
+  const preCheck = sharedLedger ? sharedLedger.agg : aggregateLedgerForPeriod_(readRows_(ss, 'AIUsage'), currentYM);
   if (preCheck.blocked) {
     throw UserError_(
       'AI usage ledger integrity check failed; dispatch is blocked pending review (' + preCheck.blockReason + ').',
@@ -672,7 +691,7 @@ function scoreSingleJobInDb_(ss, job, runId) {
 
   // Step 5: reserve. Every guaranteed pre-dispatch failure has been ruled
   // out by this point.
-  const reservationId = checkAndReserveMonthlyBudgetInDb_(ss, job.id, runId, profileVersion);
+  const reservationId = checkAndReserveMonthlyBudgetInDb_(ss, job.id, runId, profileVersion, sharedLedger);
 
   // Step 6: dispatch — the only call that can actually spend money.
   let providerResult;
@@ -687,12 +706,12 @@ function scoreSingleJobInDb_(ss, job, runId) {
   if (dispatchError) {
     const inT = Number.isInteger(dispatchError.inputTokens) ? dispatchError.inputTokens : GEMINI_MAX_INPUT_TOKENS_;
     const outT = Number.isInteger(dispatchError.outputTokens) ? dispatchError.outputTokens : GEMINI_MAX_OUTPUT_TOKENS_;
-    reconcileUsageInDb_(ss, reservationId, inT, outT, 'Failed', dispatchError.code || 'API_ERROR');
+    reconcileUsageInDb_(ss, reservationId, inT, outT, 'Failed', dispatchError.code || 'API_ERROR', sharedLedger);
     throw dispatchError;
   }
 
   reconcileUsageInDb_(
-    ss, reservationId, providerResult.inputTokens, providerResult.outputTokens, 'Completed', ''
+    ss, reservationId, providerResult.inputTokens, providerResult.outputTokens, 'Completed', '', sharedLedger
   );
 
   // Step 8: validate and publish, or quarantine.
@@ -950,6 +969,15 @@ function scorePendingJobs(maxCandidates) {
     const runId = 'score_run_' + new Date().getTime();
     const allJobs = readRows_(ss, 'Jobs');
 
+    const usageRows = readRows_(ss, 'AIUsage');
+    const now = new Date();
+    const currentYM = getNewYorkYearMonth_(now);
+    const sharedLedger = {
+      rows: usageRows,
+      currentYM: currentYM,
+      agg: aggregateLedgerForPeriod_(usageRows, currentYM)
+    };
+
     // FIXED F7: Include jobs without score, or those whose score is out of date.
     const eligibleJobs = allJobs.filter(function (j) {
       if (!j.description || String(j.description).trim().length === 0) return false;
@@ -988,7 +1016,7 @@ function scorePendingJobs(maxCandidates) {
     for (let i = 0; i < eligibleJobs.length; i++) {
       const job = eligibleJobs[i];
       try {
-        const res = scoreSingleJobInDb_(ss, job, runId);
+        const res = scoreSingleJobInDb_(ss, job, runId, sharedLedger);
         if (res.status === 'scored') summary.scored++;
         else if (res.status === 'cached') summary.cached++;
         else if (res.status === 'quarantined') summary.quarantined++;
