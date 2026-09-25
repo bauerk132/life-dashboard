@@ -431,6 +431,67 @@ function readRows_(ss, sheetName) {
  * stored (with server-assigned id/timestamps and normal read-path
  * serialization applied).
  */
+function queryRecordsInDb_(ss, sheetName, conditions) {
+  const sheet = getVerifiedSheet_(ss, sheetName);
+  const fields = SCHEMA[sheetName];
+  const dateOnly = DATE_ONLY_FIELDS_[sheetName] || [];
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  const values = sheet.getRange(2, 1, lastRow - 1, fields.length).getValues();
+  const tz = getTimeZone_();
+  const rows = [];
+
+  const condKeys = Object.keys(conditions);
+  const condIndices = condKeys.map(function(k) { return fields.indexOf(k); });
+
+  for (let r = 0; r < values.length; r++) {
+    const row = values[r];
+
+    let match = true;
+    for (let i = 0; i < condKeys.length; i++) {
+      const idx = condIndices[i];
+      if (idx === -1) { match = false; break; }
+
+      const expected = conditions[condKeys[i]];
+      const actual = row[idx];
+
+      if (Array.isArray(expected)) {
+        if (expected.indexOf(actual) === -1) { match = false; break; }
+      } else {
+        if (actual !== expected) { match = false; break; }
+      }
+    }
+
+    if (!match) continue;
+
+    const isBlank = row.every(function (v) { return v === '' || v === null || v === undefined; });
+    if (isBlank) continue;
+
+    const obj = {};
+    for (let c = 0; c < fields.length; c++) {
+      const field = fields[c];
+      const raw = row[c];
+      if (isDateValue_(raw)) {
+        obj[field] = dateOnly.indexOf(field) !== -1
+          ? Utilities.formatDate(raw, tz, 'yyyy-MM-dd')
+          : raw.toISOString();
+      } else if (raw === undefined || raw === null) {
+        obj[field] = '';
+      } else {
+        obj[field] = raw;
+      }
+    }
+    rows.push(obj);
+  }
+
+  return rows;
+}
+
+/**
+ * Validates a schema mismatch or unexpected fields before blindly writing
+ * them to a sheet row. Extraneous fields throw.
+ */
 function appendRecordInDb_(ss, sheetName, record) {
     assertSheetName_(sheetName);
     if (record === null || typeof record !== 'object' || Array.isArray(record)) {
