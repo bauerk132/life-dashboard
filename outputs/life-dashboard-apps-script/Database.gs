@@ -402,23 +402,30 @@ function readRows_(ss, sheetName) {
     const isBlank = row.every(function (v) { return v === '' || v === null || v === undefined; });
     if (isBlank) continue;
 
-    const obj = {};
-    for (let c = 0; c < fields.length; c++) {
-      const field = fields[c];
-      const raw = row[c];
-      if (isDateValue_(raw)) {
-        obj[field] = dateOnly.indexOf(field) !== -1
-          ? Utilities.formatDate(raw, tz, 'yyyy-MM-dd')
-          : raw.toISOString();
-      } else if (raw === undefined || raw === null) {
-        obj[field] = '';
-      } else {
-        obj[field] = raw;
-      }
-    }
-    rows.push(obj);
+    rows.push(parseRowToObject_(row, fields, dateOnly, tz));
   }
   return rows;
+}
+
+/**
+ * Parses a single row array from Sheets into a plain object using the schema.
+ */
+function parseRowToObject_(row, fields, dateOnly, tz) {
+  const obj = {};
+  for (let c = 0; c < fields.length; c++) {
+    const field = fields[c];
+    const raw = row[c];
+    if (isDateValue_(raw)) {
+      obj[field] = dateOnly.indexOf(field) !== -1
+        ? Utilities.formatDate(raw, tz, 'yyyy-MM-dd')
+        : raw.toISOString();
+    } else if (raw === undefined || raw === null) {
+      obj[field] = '';
+    } else {
+      obj[field] = raw;
+    }
+  }
+  return obj;
 }
 
 /**
@@ -498,10 +505,17 @@ function appendRecordInDb_(ss, sheetName, record) {
     // this function just wrote cannot be found by its own key — a lock is
     // held for the whole call, so nothing else could have written it away;
     // surface that loudly rather than silently returning undefined.
-    const stored = readRows_(ss, sheetName).filter(function (r) {
-      return String(r[keyField]) === String(toWrite[keyField]);
-    })[0];
-    if (!stored) {
+    //
+    // Since we hold the lock, getLastRow() points directly to the row we
+    // just appended. Fetching and parsing only this one row is O(1) compared
+    // to O(N) for scanning the entire sheet.
+    const lastRowIndex = sheet.getLastRow();
+    const storedRowValues = sheet.getRange(lastRowIndex, 1, 1, fields.length).getValues()[0];
+    const tz = getTimeZone_();
+    const dateOnly = DATE_ONLY_FIELDS_[sheetName] || [];
+    const stored = parseRowToObject_(storedRowValues, fields, dateOnly, tz);
+
+    if (String(stored[keyField]) !== String(toWrite[keyField])) {
       throw UserError_('The record was saved but could not be read back.', 'READBACK_FAILED');
     }
     return stored;
