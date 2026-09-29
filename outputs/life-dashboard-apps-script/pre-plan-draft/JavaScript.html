@@ -28,11 +28,120 @@
   }
   function renderJobs() {
     const jobs = state.data.jobs.filter(job => state.jobFilter === 'all' || (state.jobFilter === 'strong' && Number(job.overall_match) >= 90) || (state.jobFilter === 'remote' && String(job.remote).toLowerCase().includes('remote')) || (state.jobFilter === 'saved' && ['Saved','Ready to Apply'].includes(job.status)));
-    $('#jobs').innerHTML = `<div class="job-toolbar"><h2 class="section-title" style="margin-right:auto">Ready-to-go jobs</h2>${[['all','All'],['strong','90%+ match'],['remote','Remote'],['saved','Saved']].map(([id,label]) => `<button class="filter ${state.jobFilter===id?'active':''}" data-filter="${id}">${label}</button>`).join('')}</div><div class="job-list">${jobs.map(jobCard).join('') || '<article class="card empty">No jobs match this filter.</article>'}</div>`;
-    document.querySelectorAll('[data-filter]').forEach(button => button.addEventListener('click', () => { state.jobFilter = button.dataset.filter; renderJobs(); }));
-    document.querySelectorAll('[data-job-status]').forEach(button => button.addEventListener('click', () => changeJobStatus(button.dataset.id, button.dataset.jobStatus)));
+    const jobsEl = $('#jobs');
+    jobsEl.textContent = '';
+
+    const toolbar = document.createElement('div');
+    toolbar.className = 'job-toolbar';
+    const title = document.createElement('h2');
+    title.className = 'section-title';
+    title.style.marginRight = 'auto';
+    title.textContent = 'Ready-to-go jobs';
+    toolbar.appendChild(title);
+
+    [['all','All'],['strong','90%+ match'],['remote','Remote'],['saved','Saved']].forEach(([id,label]) => {
+      const btn = document.createElement('button');
+      btn.className = `filter ${state.jobFilter === id ? 'active' : ''}`;
+      btn.dataset.filter = id;
+      btn.textContent = label;
+      btn.addEventListener('click', () => { state.jobFilter = id; renderJobs(); });
+      toolbar.appendChild(btn);
+    });
+    jobsEl.appendChild(toolbar);
+
+    const jobList = document.createElement('div');
+    jobList.className = 'job-list';
+    if (jobs.length === 0) {
+      const empty = document.createElement('article');
+      empty.className = 'card empty';
+      empty.textContent = 'No jobs match this filter.';
+      jobList.appendChild(empty);
+    } else {
+      jobs.forEach(job => jobList.appendChild(jobCard(job)));
+    }
+    jobsEl.appendChild(jobList);
   }
-  function jobCard(job) { return `<article class="card job-card"><div class="job-head"><div><h3 class="job-title">${escapeHtml(job.title)}</h3><p class="company">${escapeHtml(job.company)} · ${escapeHtml(job.location)}</p></div><div class="score">${escapeHtml(job.overall_match || '—')}<span>MATCH</span></div></div><div class="pills"><span class="pill">${escapeHtml(job.remote || 'Location unknown')}</span><span class="pill">${formatMoney(job.salary_min,job.salary_max)}</span><span class="pill">${escapeHtml(job.recommendation || 'Unscored')}</span><span class="pill">${escapeHtml(job.status)}</span></div><div class="reason"><div><strong>Why it matches</strong>${escapeHtml(job.why_matches || 'Awaiting scoring')}</div><div><strong>Possible gaps</strong>${escapeHtml(job.gaps || 'None identified')}</div></div><div class="actions"><button class="button" data-id="${job.id}" data-job-status="Reviewed">Reviewed</button><button class="button primary" data-id="${job.id}" data-job-status="Saved">Save</button><button class="button" data-id="${job.id}" data-job-status="Ready to Apply">Ready to apply</button>${job.url ? `<a class="button" href="${escapeHtml(job.url)}" target="_blank" rel="noopener">View job</a>` : ''}<button class="button danger" data-id="${job.id}" data-job-status="Rejected">Reject</button></div></article>`; }
+
+  function jobCard(job) {
+    const article = document.createElement('article');
+    article.className = 'card job-card';
+
+    const head = document.createElement('div');
+    head.className = 'job-head';
+    const headLeft = document.createElement('div');
+    const h3 = document.createElement('h3');
+    h3.className = 'job-title';
+    h3.textContent = job.title || '';
+    const pCompany = document.createElement('p');
+    pCompany.className = 'company';
+    pCompany.textContent = `${job.company || ''} · ${job.location || ''}`;
+    headLeft.appendChild(h3);
+    headLeft.appendChild(pCompany);
+
+    const scoreDiv = document.createElement('div');
+    scoreDiv.className = 'score';
+    scoreDiv.textContent = job.overall_match || '—';
+    const spanMatch = document.createElement('span');
+    spanMatch.textContent = 'MATCH';
+    scoreDiv.appendChild(spanMatch);
+    head.appendChild(headLeft);
+    head.appendChild(scoreDiv);
+    article.appendChild(head);
+
+    const pills = document.createElement('div');
+    pills.className = 'pills';
+    const p1 = document.createElement('span'); p1.className = 'pill'; p1.textContent = job.remote || 'Location unknown';
+    const p2 = document.createElement('span'); p2.className = 'pill'; p2.textContent = formatMoney(job.salary_min, job.salary_max);
+    const p3 = document.createElement('span'); p3.className = 'pill'; p3.textContent = job.recommendation || 'Unscored';
+    const p4 = document.createElement('span'); p4.className = 'pill'; p4.textContent = job.status || '';
+    pills.appendChild(p1); pills.appendChild(p2); pills.appendChild(p3); pills.appendChild(p4);
+    article.appendChild(pills);
+
+    const reason = document.createElement('div');
+    reason.className = 'reason';
+    const r1 = document.createElement('div');
+    const st1 = document.createElement('strong'); st1.textContent = 'Why it matches';
+    r1.appendChild(st1);
+    r1.appendChild(document.createTextNode(job.why_matches || 'Awaiting scoring'));
+    const r2 = document.createElement('div');
+    const st2 = document.createElement('strong'); st2.textContent = 'Possible gaps';
+    r2.appendChild(st2);
+    r2.appendChild(document.createTextNode(job.gaps || 'None identified'));
+    reason.appendChild(r1); reason.appendChild(r2);
+    article.appendChild(reason);
+
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+
+    const createBtn = (label, statusClass, statusValue) => {
+      const b = document.createElement('button');
+      b.className = `button ${statusClass}`.trim();
+      b.dataset.id = job.id;
+      b.dataset.jobStatus = statusValue;
+      b.textContent = label;
+      b.addEventListener('click', () => changeJobStatus(job.id, statusValue));
+      return b;
+    };
+
+    actions.appendChild(createBtn('Reviewed', '', 'Reviewed'));
+    actions.appendChild(createBtn('Save', 'primary', 'Saved'));
+    actions.appendChild(createBtn('Ready to apply', '', 'Ready to Apply'));
+
+    if (job.url) {
+      const a = document.createElement('a');
+      a.className = 'button';
+      a.href = job.url;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.textContent = 'View job';
+      actions.appendChild(a);
+    }
+
+    actions.appendChild(createBtn('Reject', 'danger', 'Rejected'));
+    article.appendChild(actions);
+
+    return article;
+  }
   function renderTasks() { $('#tasks').innerHTML = `<article class="card"><h2 class="section-title">Tasks</h2><p class="muted">Changes save straight to your Tasks sheet.</p><form class="task-form" id="taskForm"><input class="field" name="title" required placeholder="Add a task"><input class="field" name="dueDate" type="date"><select class="field" name="priority"><option>Medium</option><option>High</option><option>Low</option></select><button class="button primary">Add task</button></form><div>${state.data.tasks.map(taskRow).join('') || '<p class="empty">No tasks yet.</p>'}</div></article>`; $('#taskForm').addEventListener('submit', addTask); document.querySelectorAll('[data-task-id]').forEach(button => button.addEventListener('click', () => changeTaskStatus(button.dataset.taskId, button.dataset.taskStatus))); }
   function taskRow(task) { const done = task.status === 'Done'; return `<div class="row"><div><strong class="${done?'done':''}">${escapeHtml(task.title)}</strong><div class="muted">${formatDate(task.due_date)} · <span class="priority ${escapeHtml(task.priority)}">${escapeHtml(task.priority)}</span></div></div><button class="button" data-task-id="${task.id}" data-task-status="${done?'Open':'Done'}">${done?'Reopen':'Complete'}</button></div>`; }
   async function addTask(event) { event.preventDefault(); const form = new FormData(event.target); await runAction(() => call('createTask',{title:form.get('title'),dueDate:form.get('dueDate'),priority:form.get('priority')}),'Task added.'); }
