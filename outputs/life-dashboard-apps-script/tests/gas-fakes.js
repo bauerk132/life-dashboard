@@ -24,6 +24,59 @@ const vm = require('vm');
 
 const PROJECT_ROOT = path.join(__dirname, '..');
 
+function createRange_(sheet, row, col, numRows, numCols) {
+  if (numRows === undefined) numRows = 1;
+  if (numCols === undefined) numCols = 1;
+  return {
+    getValues: function () {
+      const out = [];
+      for (let r = 0; r < numRows; r++) {
+        const srcRow = sheet.data[row + r - 1] || [];
+        const outRow = [];
+        for (let c = 0; c < numCols; c++) {
+          const v = srcRow[col + c - 1];
+          outRow.push(v === undefined ? '' : v);
+        }
+        out.push(outRow);
+      }
+      return out;
+    },
+    setValues: function (values) {
+      for (let r = 0; r < numRows; r++) {
+        const sheetRow = row + r - 1;
+        if (!sheet.data[sheetRow]) sheet.data[sheetRow] = [];
+        for (let c = 0; c < numCols; c++) {
+          sheet.data[sheetRow][col + c - 1] = values[r][c];
+        }
+      }
+      return this;
+    },
+    setFontWeight: function () { return this; },
+    setNumberFormat: function (fmt) {
+      for (let r = 0; r < numRows; r++) {
+        const sheetRow = row + r - 1;
+        if (!sheet.formats[sheetRow]) sheet.formats[sheetRow] = [];
+        for (let c = 0; c < numCols; c++) {
+          sheet.formats[sheetRow][col + c - 1] = fmt;
+        }
+      }
+      return this;
+    },
+    getNumberFormats: function () {
+      const out = [];
+      for (let r = 0; r < numRows; r++) {
+        const srcRow = sheet.formats[row + r - 1] || [];
+        const outRow = [];
+        for (let c = 0; c < numCols; c++) {
+          outRow.push(srcRow[col + c - 1] || 'General');
+        }
+        out.push(outRow);
+      }
+      return out;
+    }
+  };
+}
+
 function createSheet_(name) {
   return {
     name: name,
@@ -56,57 +109,7 @@ function createSheet_(name) {
     },
 
     getRange: function (row, col, numRows, numCols) {
-      if (numRows === undefined) numRows = 1;
-      if (numCols === undefined) numCols = 1;
-      const sheet = this;
-      return {
-        getValues: function () {
-          const out = [];
-          for (let r = 0; r < numRows; r++) {
-            const srcRow = sheet.data[row + r - 1] || [];
-            const outRow = [];
-            for (let c = 0; c < numCols; c++) {
-              const v = srcRow[col + c - 1];
-              outRow.push(v === undefined ? '' : v);
-            }
-            out.push(outRow);
-          }
-          return out;
-        },
-        setValues: function (values) {
-          for (let r = 0; r < numRows; r++) {
-            const sheetRow = row + r - 1;
-            if (!sheet.data[sheetRow]) sheet.data[sheetRow] = [];
-            for (let c = 0; c < numCols; c++) {
-              sheet.data[sheetRow][col + c - 1] = values[r][c];
-            }
-          }
-          return this;
-        },
-        setFontWeight: function () { return this; },
-        setNumberFormat: function (fmt) {
-          for (let r = 0; r < numRows; r++) {
-            const sheetRow = row + r - 1;
-            if (!sheet.formats[sheetRow]) sheet.formats[sheetRow] = [];
-            for (let c = 0; c < numCols; c++) {
-              sheet.formats[sheetRow][col + c - 1] = fmt;
-            }
-          }
-          return this;
-        },
-        getNumberFormats: function () {
-          const out = [];
-          for (let r = 0; r < numRows; r++) {
-            const srcRow = sheet.formats[row + r - 1] || [];
-            const outRow = [];
-            for (let c = 0; c < numCols; c++) {
-              outRow.push(srcRow[col + c - 1] || 'General');
-            }
-            out.push(outRow);
-          }
-          return out;
-        }
-      };
+      return createRange_(this, row, col, numRows, numCols);
     },
 
     appendRow: function (values) {
