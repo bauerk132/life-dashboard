@@ -180,6 +180,16 @@ function extractTopLevelFunctionNames(source) {
   return names;
 }
 
+function getTopLevelFunctionEntries() {
+  const entries = [];
+  DEPLOYED_GS_FILES.forEach((filename) => {
+    extractTopLevelFunctionNames(readDeployed(filename)).forEach((name) => {
+      entries.push({ filename, name });
+    });
+  });
+  return entries;
+}
+
 function extractIncludableFiles(codeGsSource) {
   const match = codeGsSource.match(/INCLUDABLE_FILES_\s*=\s*Object\.freeze\(\[([^\]]*)\]\)/);
   assert.ok(match, 'Code.gs must define INCLUDABLE_FILES_ as Object.freeze([...])');
@@ -285,24 +295,15 @@ describe('static checks: banned patterns absent from deployed files', () => {
 
 describe('static checks: no browser-callable raw helpers', () => {
   it('every top-level function in Code.gs and Database.gs is either publicly allowlisted or ends in _', () => {
-    const offenders = [];
-    DEPLOYED_GS_FILES.forEach((filename) => {
-      extractTopLevelFunctionNames(readDeployed(filename)).forEach((name) => {
-        const isPrivate = name.slice(-1) === '_';
-        const isAllowlisted = PUBLIC_ALLOWLIST.indexOf(name) !== -1;
-        if (!isPrivate && !isAllowlisted) {
-          offenders.push(filename + ':' + name);
-        }
-      });
-    });
+    const offenders = getTopLevelFunctionEntries()
+      .filter(({ name }) => !name.endsWith('_') && !PUBLIC_ALLOWLIST.includes(name))
+      .map(({ filename, name }) => `${filename}:${name}`);
+
     assert.deepEqual(offenders, [], 'every non-underscore top-level function must be on PUBLIC_ALLOWLIST');
   });
 
   it('PUBLIC_ALLOWLIST names are all actually declared somewhere in the deployed .gs files', () => {
-    const declared = new Set();
-    DEPLOYED_GS_FILES.forEach((filename) => {
-      extractTopLevelFunctionNames(readDeployed(filename)).forEach((name) => declared.add(name));
-    });
+    const declared = new Set(getTopLevelFunctionEntries().map(({ name }) => name));
     PUBLIC_ALLOWLIST.forEach((name) => {
       assert.ok(declared.has(name), `PUBLIC_ALLOWLIST entry "${name}" is not declared in any deployed .gs file`);
     });
