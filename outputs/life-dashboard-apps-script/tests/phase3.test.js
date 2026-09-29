@@ -24,8 +24,8 @@ function rowFor_(schema, sheetName, values) {
   ));
 }
 
-function jobRow_(schema, overrides) {
-  const base = {
+function getDefaultJobAttributes_() {
+  return {
     id: 'job-1',
     external_id: 'source-1',
     source: 'Example Board',
@@ -49,6 +49,10 @@ function jobRow_(schema, overrides) {
     notes: '',
     record_version: 0
   };
+}
+
+function jobRow_(schema, overrides) {
+  const base = getDefaultJobAttributes_();
   return rowFor_(schema, 'Jobs', Object.assign(base, overrides || {}));
 }
 
