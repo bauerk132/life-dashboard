@@ -499,6 +499,7 @@
 
       addTaskPending = true;
       setAddTaskFormDisabled(true);
+      addTaskSubmitBtn.textContent = 'Adding task...';
       showAddTaskError('');
 
       google.script.run
@@ -507,6 +508,7 @@
           pendingCreateTitle = null;
           addTaskPending = false;
           setAddTaskFormDisabled(false);
+          addTaskSubmitBtn.textContent = 'Add task';
           showAddTaskError('');
           taskTitleInput.value = '';
           taskDueDateInput.value = '';
@@ -517,6 +519,7 @@
         .withFailureHandler(function (err) {
           addTaskPending = false;
           setAddTaskFormDisabled(false);
+          addTaskSubmitBtn.textContent = 'Add task';
           var msg = (err && err.message) ? err.message : 'The task could not be added.';
           showAddTaskError(msg);
           announceAlert(msg);
