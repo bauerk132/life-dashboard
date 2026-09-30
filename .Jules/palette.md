@@ -1,3 +1,3 @@
-## 2026-09-29 - Text-Based Loading Indicators
-**Learning:** The preferred UX pattern for async loading states in this application is text-based indicators (e.g., changing button text to 'Adding task…') to avoid adding custom CSS or spinner dependencies.
-**Action:** Use this text-based loading pattern in the future when adding UX improvements that require a loading state.
+## 2026-09-30 - Text-based Loading States for Better UX
+**Learning:** Using text-based loading feedback (e.g. changing "Refresh queue" to "Refreshing queue...") in addition to standard disabled button styles significantly improves perceived performance and accessibility. It provides screen-reader users with immediate, clear context for what operation is blocking the UI.
+**Action:** When implementing async actions tied to a button, change the button's text to a loading state phrase in addition to setting the disabled attribute, then restore the original text upon success or failure.
