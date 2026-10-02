@@ -561,11 +561,13 @@
       jobsState.status = 'loading';
       jobsState.errorMessage = '';
       jobsRefreshBtn.disabled = true;
+      jobsRefreshBtn.textContent = 'Refreshing queue…';
       renderJobsContainer();
 
       google.script.run
         .withSuccessHandler(function (result) {
           jobsRefreshBtn.disabled = false;
+          jobsRefreshBtn.textContent = 'Refresh queue';
           if (result && result.status === 'ok') {
             jobsState.status = 'ok';
             jobsState.data = result;
@@ -578,6 +580,7 @@
         })
         .withFailureHandler(function (err) {
           jobsRefreshBtn.disabled = false;
+          jobsRefreshBtn.textContent = 'Refresh queue';
           jobsState.status = 'error';
           jobsState.errorMessage = (err && err.message) ? err.message : 'The stored job queue is unavailable right now.';
           renderJobsContainer();
@@ -1113,7 +1116,10 @@
     function runScoreNextJob() {
       if (scoringBudgetState.scoringPending) return;
       scoringBudgetState.scoringPending = true;
-      if (scoreNextJobBtn) scoreNextJobBtn.disabled = true;
+      if (scoreNextJobBtn) {
+        scoreNextJobBtn.disabled = true;
+        scoreNextJobBtn.textContent = 'Scoring…';
+      }
       if (scoringBudgetStatusEl) scoringBudgetStatusEl.setAttribute('aria-busy', 'true');
       if (scoringRunResultEl) {
         scoringRunResultEl.className = 'scoring-run-banner';
@@ -1125,7 +1131,10 @@
         .withSuccessHandler(function (result) {
           scoringBudgetState.scoringPending = false;
           if (scoringBudgetStatusEl) scoringBudgetStatusEl.setAttribute('aria-busy', 'false');
-          if (scoreNextJobBtn) scoreNextJobBtn.disabled = false;
+          if (scoreNextJobBtn) {
+            scoreNextJobBtn.disabled = false;
+            scoreNextJobBtn.textContent = 'Score next eligible job';
+          }
 
           if (scoringRunResultEl) {
             if (result && result.stoppedReason) {
@@ -1150,7 +1159,10 @@
         .withFailureHandler(function (err) {
           scoringBudgetState.scoringPending = false;
           if (scoringBudgetStatusEl) scoringBudgetStatusEl.setAttribute('aria-busy', 'false');
-          if (scoreNextJobBtn) scoreNextJobBtn.disabled = false;
+          if (scoreNextJobBtn) {
+            scoreNextJobBtn.disabled = false;
+            scoreNextJobBtn.textContent = 'Score next eligible job';
+          }
 
           var errorMsg = 'The scoring run could not be completed. Refresh and try again.';
           if (err && err.code) {
