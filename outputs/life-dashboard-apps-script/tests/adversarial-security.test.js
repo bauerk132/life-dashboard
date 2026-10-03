@@ -656,7 +656,7 @@ describe('Adversarial 2: Double-Click Suppression & Concurrency Invariants', () 
     const card = harness.elements.jobsContainer.querySelector('.job-card');
     assert.ok(card, 'job card rendered');
     const actions = card.querySelectorAll('.job-actions button');
-    const reviewBtn = actions.find(b => b.textContent === 'Mark reviewed');
+    const reviewBtn = actions.find(b => b.textContent === 'Mark reviewed' || b.textContent === 'Mark reviewed…');
     assert.ok(reviewBtn, 'Mark reviewed button exists');
 
     // Burst of 5 clicks on the button
@@ -664,7 +664,7 @@ describe('Adversarial 2: Double-Click Suppression & Concurrency Invariants', () 
     // Subsequent clicks either on the old ref or current ref
     reviewBtn.click();
     const currentCard = harness.elements.jobsContainer.querySelector('.job-card');
-    const currentReviewBtn = currentCard.querySelectorAll('.job-actions button').find(b => b.textContent === 'Mark reviewed');
+    const currentReviewBtn = currentCard.querySelectorAll('.job-actions button').find(b => b.textContent === 'Mark reviewed' || b.textContent === 'Mark reviewed…');
     currentReviewBtn.click();
     currentReviewBtn.click();
     currentReviewBtn.click();
