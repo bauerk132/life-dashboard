@@ -561,11 +561,13 @@
       jobsState.status = 'loading';
       jobsState.errorMessage = '';
       jobsRefreshBtn.disabled = true;
+      jobsRefreshBtn.textContent = 'Refreshing queue…';
       renderJobsContainer();
 
       google.script.run
         .withSuccessHandler(function (result) {
           jobsRefreshBtn.disabled = false;
+          jobsRefreshBtn.textContent = 'Refresh queue';
           if (result && result.status === 'ok') {
             jobsState.status = 'ok';
             jobsState.data = result;
@@ -578,6 +580,7 @@
         })
         .withFailureHandler(function (err) {
           jobsRefreshBtn.disabled = false;
+          jobsRefreshBtn.textContent = 'Refresh queue';
           jobsState.status = 'error';
           jobsState.errorMessage = (err && err.message) ? err.message : 'The stored job queue is unavailable right now.';
           renderJobsContainer();
