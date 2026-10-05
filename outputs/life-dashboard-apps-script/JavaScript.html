@@ -301,7 +301,7 @@
     // shown only when the server would actually accept that transition
     // for the task's current status.
     // ---------------------------------------------------------------------
-    var taskActionPending = {}; // task id -> true while a mutation is in-flight
+    var taskActionPending = {}; // task id -> fnName while a mutation is in-flight
     var tasksActionError = null; // last task-action failure message, shown inline
 
     function renderTasksContainer() {
@@ -386,22 +386,14 @@
 
       var actions = document.createElement('div');
       actions.className = 'task-actions';
-      var pending = !!taskActionPending[task.id];
+      var pendingAction = taskActionPending[task.id];
 
       if (task.status === 'Open') {
-        actions.appendChild(buildTaskActionButton(task, 'Complete', pending, function () {
-          runTaskAction(task.id, 'completeTask', 'Task completed.');
-        }));
-        actions.appendChild(buildTaskActionButton(task, 'Archive', pending, function () {
-          runTaskAction(task.id, 'archiveTask', 'Task archived.');
-        }));
+        actions.appendChild(buildTaskActionButton(task, 'Complete', pendingAction, 'completeTask', 'Task completed.'));
+        actions.appendChild(buildTaskActionButton(task, 'Archive', pendingAction, 'archiveTask', 'Task archived.'));
       } else if (task.status === 'Done') {
-        actions.appendChild(buildTaskActionButton(task, 'Reopen', pending, function () {
-          runTaskAction(task.id, 'reopenTask', 'Task reopened.');
-        }));
-        actions.appendChild(buildTaskActionButton(task, 'Archive', pending, function () {
-          runTaskAction(task.id, 'archiveTask', 'Task archived.');
-        }));
+        actions.appendChild(buildTaskActionButton(task, 'Reopen', pendingAction, 'reopenTask', 'Task reopened.'));
+        actions.appendChild(buildTaskActionButton(task, 'Archive', pendingAction, 'archiveTask', 'Task archived.'));
       }
       // Archived tasks never reach this list: getDashboardData() already
       // excludes status "Archived", so no action set is needed for it.
@@ -410,23 +402,31 @@
       return li;
     }
 
-    function buildTaskActionButton(task, label, pending, onClick) {
+    function buildTaskActionButton(task, label, pendingAction, fnName, successMessage) {
       var btn = document.createElement('button');
       btn.type = 'button';
-      btn.textContent = label;
-      btn.disabled = pending;
+      var displayLabel = label;
+      if (pendingAction === fnName) {
+        if (label === 'Complete') displayLabel = 'Completing…';
+        else if (label === 'Archive') displayLabel = 'Archiving…';
+        else if (label === 'Reopen') displayLabel = 'Reopening…';
+      }
+      btn.textContent = displayLabel;
+      btn.disabled = !!pendingAction;
       // setAttribute never parses its value as markup, so building this
       // string from task.title (server-derived free text) is safe — this
       // is not an innerHTML/markup-injection path.
       btn.setAttribute('aria-label', label + ' "' + task.title + '"');
-      btn.addEventListener('click', onClick);
+      btn.addEventListener('click', function () {
+        runTaskAction(task.id, fnName, successMessage);
+      });
       return btn;
     }
 
     // Only the acted-on task's own buttons are disabled while its request
     // is in flight — the rest of the list stays interactive.
     function runTaskAction(id, fnName, successMessage) {
-      taskActionPending[id] = true;
+      taskActionPending[id] = fnName;
       tasksActionError = null;
       renderTasksContainer();
 
