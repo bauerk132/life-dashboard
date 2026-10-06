@@ -724,6 +724,74 @@ describe('Phase 4A: Normalization and Sanitization (T19 - T26)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Helpers for Suite 4: Quota Guard
+// ---------------------------------------------------------------------------
+function verifyDailyCaps_({ ctx, query }) {
+  // 5 scheduled calls succeed
+  for (let i = 0; i < 5; i++) {
+    const res = hostify_(ctx.sandbox.jsearchFetchPage_(query, { mode: 'scheduled', nowDate: FIXED_NOW }));
+    assert.equal(res.status, 'EMPTY');
+  }
+  assert.equal(ctx.urlFetch.calls.length, 5);
+
+  // 6th scheduled call blocked
+  const resBlocked6 = hostify_(ctx.sandbox.jsearchFetchPage_(query, { mode: 'scheduled', nowDate: FIXED_NOW }));
+  assert.equal(resBlocked6.status, 'BUDGET_BLOCKED');
+  assert.equal(ctx.urlFetch.calls.length, 5);
+
+  // 3 manual calls succeed
+  for (let i = 0; i < 3; i++) {
+    const res = hostify_(ctx.sandbox.jsearchFetchPage_(query, { mode: 'manual', nowDate: FIXED_NOW }));
+    assert.equal(res.status, 'EMPTY');
+  }
+  assert.equal(ctx.urlFetch.calls.length, 8);
+
+  // 4th manual call blocked
+  const resBlockedManual = hostify_(ctx.sandbox.jsearchFetchPage_(query, { mode: 'manual', nowDate: FIXED_NOW }));
+  assert.equal(resBlockedManual.status, 'BUDGET_BLOCKED');
+  assert.equal(ctx.urlFetch.calls.length, 8);
+}
+
+function verifyDailyRollover_({ ctx, query, nextDay }) {
+  // Advancing day resets daily caps
+  const resNextDay = hostify_(ctx.sandbox.jsearchFetchPage_(query, { mode: 'scheduled', nowDate: nextDay }));
+  assert.equal(resNextDay.status, 'EMPTY');
+  assert.equal(ctx.urlFetch.calls.length, 9);
+}
+
+function verifyReserveAndPeriodThresholds_({ ctx, query, nextDay }) {
+  // Test reserve threshold: periodCount >= 180 blocks scheduled, allows manual
+  const props = ctx.sandbox.PropertiesService.getScriptProperties();
+  const quotaState = JSON.parse(props.getProperty('JSEARCH_QUOTA_STATE'));
+  quotaState.periodCount = 180;
+  quotaState.dayCountScheduled = 0;
+  quotaState.dayCountManual = 0;
+  props.setProperty('JSEARCH_QUOTA_STATE', JSON.stringify(quotaState));
+
+  const resSchedAt180 = hostify_(ctx.sandbox.jsearchFetchPage_(query, { mode: 'scheduled', nowDate: nextDay }));
+  assert.equal(resSchedAt180.status, 'BUDGET_BLOCKED');
+  assert.equal(ctx.urlFetch.calls.length, 9); // no fetch call
+
+  const resManualAt180 = hostify_(ctx.sandbox.jsearchFetchPage_(query, { mode: 'manual', nowDate: nextDay }));
+  assert.equal(resManualAt180.status, 'EMPTY');
+  assert.equal(ctx.urlFetch.calls.length, 10);
+
+  // Test both blocked at periodCount = 200
+  quotaState.periodCount = 200;
+  quotaState.dayCountManual = 0;
+  props.setProperty('JSEARCH_QUOTA_STATE', JSON.stringify(quotaState));
+  const resManualAt200 = hostify_(ctx.sandbox.jsearchFetchPage_(query, { mode: 'manual', nowDate: nextDay }));
+  assert.equal(resManualAt200.status, 'BUDGET_BLOCKED');
+
+  // Test scheduled blocked when lastRemaining <= 20
+  quotaState.periodCount = 50;
+  quotaState.lastRemaining = 20;
+  props.setProperty('JSEARCH_QUOTA_STATE', JSON.stringify(quotaState));
+  const resSchedLowRemaining = hostify_(ctx.sandbox.jsearchFetchPage_(query, { mode: 'scheduled', nowDate: nextDay }));
+  assert.equal(resSchedLowRemaining.status, 'BUDGET_BLOCKED');
+}
+
+// ---------------------------------------------------------------------------
 // Suite 4: Quota Guard (T27 - T30)
 // ---------------------------------------------------------------------------
 describe('Phase 4A: Quota Guard (T27 - T30)', () => {
@@ -749,65 +817,11 @@ describe('Phase 4A: Quota Guard (T27 - T30)', () => {
     const ctx = createContext({ urlFetch: { responses: responses } });
     const query = ctx.testExports.JSEARCH_QUERY_CATALOG_[0];
 
-    // 5 scheduled calls succeed
-    for (let i = 0; i < 5; i++) {
-      const res = hostify_(ctx.sandbox.jsearchFetchPage_(query, { mode: 'scheduled', nowDate: FIXED_NOW }));
-      assert.equal(res.status, 'EMPTY');
-    }
-    assert.equal(ctx.urlFetch.calls.length, 5);
+    verifyDailyCaps_({ ctx, query });
 
-    // 6th scheduled call blocked
-    const resBlocked6 = hostify_(ctx.sandbox.jsearchFetchPage_(query, { mode: 'scheduled', nowDate: FIXED_NOW }));
-    assert.equal(resBlocked6.status, 'BUDGET_BLOCKED');
-    assert.equal(ctx.urlFetch.calls.length, 5);
-
-    // 3 manual calls succeed
-    for (let i = 0; i < 3; i++) {
-      const res = hostify_(ctx.sandbox.jsearchFetchPage_(query, { mode: 'manual', nowDate: FIXED_NOW }));
-      assert.equal(res.status, 'EMPTY');
-    }
-    assert.equal(ctx.urlFetch.calls.length, 8);
-
-    // 4th manual call blocked
-    const resBlockedManual = hostify_(ctx.sandbox.jsearchFetchPage_(query, { mode: 'manual', nowDate: FIXED_NOW }));
-    assert.equal(resBlockedManual.status, 'BUDGET_BLOCKED');
-    assert.equal(ctx.urlFetch.calls.length, 8);
-
-    // Advancing day resets daily caps
     const nextDay = new Date('2026-09-14T11:00:00.000Z');
-    const resNextDay = hostify_(ctx.sandbox.jsearchFetchPage_(query, { mode: 'scheduled', nowDate: nextDay }));
-    assert.equal(resNextDay.status, 'EMPTY');
-    assert.equal(ctx.urlFetch.calls.length, 9);
-
-    // Test reserve threshold: periodCount >= 180 blocks scheduled, allows manual
-    const props = ctx.sandbox.PropertiesService.getScriptProperties();
-    const quotaState = JSON.parse(props.getProperty('JSEARCH_QUOTA_STATE'));
-    quotaState.periodCount = 180;
-    quotaState.dayCountScheduled = 0;
-    quotaState.dayCountManual = 0;
-    props.setProperty('JSEARCH_QUOTA_STATE', JSON.stringify(quotaState));
-
-    const resSchedAt180 = hostify_(ctx.sandbox.jsearchFetchPage_(query, { mode: 'scheduled', nowDate: nextDay }));
-    assert.equal(resSchedAt180.status, 'BUDGET_BLOCKED');
-    assert.equal(ctx.urlFetch.calls.length, 9); // no fetch call
-
-    const resManualAt180 = hostify_(ctx.sandbox.jsearchFetchPage_(query, { mode: 'manual', nowDate: nextDay }));
-    assert.equal(resManualAt180.status, 'EMPTY');
-    assert.equal(ctx.urlFetch.calls.length, 10);
-
-    // Test both blocked at periodCount = 200
-    quotaState.periodCount = 200;
-    quotaState.dayCountManual = 0;
-    props.setProperty('JSEARCH_QUOTA_STATE', JSON.stringify(quotaState));
-    const resManualAt200 = hostify_(ctx.sandbox.jsearchFetchPage_(query, { mode: 'manual', nowDate: nextDay }));
-    assert.equal(resManualAt200.status, 'BUDGET_BLOCKED');
-
-    // Test scheduled blocked when lastRemaining <= 20
-    quotaState.periodCount = 50;
-    quotaState.lastRemaining = 20;
-    props.setProperty('JSEARCH_QUOTA_STATE', JSON.stringify(quotaState));
-    const resSchedLowRemaining = hostify_(ctx.sandbox.jsearchFetchPage_(query, { mode: 'scheduled', nowDate: nextDay }));
-    assert.equal(resSchedLowRemaining.status, 'BUDGET_BLOCKED');
+    verifyDailyRollover_({ ctx, query, nextDay });
+    verifyReserveAndPeriodThresholds_({ ctx, query, nextDay });
   });
 
   it('T29: headers parsing, observedDelta, periodKey hdr switch, period rollover, state recovery', () => {
