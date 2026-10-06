@@ -386,20 +386,20 @@
 
       var actions = document.createElement('div');
       actions.className = 'task-actions';
-      var pending = !!taskActionPending[task.id];
+      var pendingFn = taskActionPending[task.id];
 
       if (task.status === 'Open') {
-        actions.appendChild(buildTaskActionButton(task, 'Complete', pending, function () {
+        actions.appendChild(buildTaskActionButton(task, 'Complete', 'completeTask', pendingFn, function () {
           runTaskAction(task.id, 'completeTask', 'Task completed.');
         }));
-        actions.appendChild(buildTaskActionButton(task, 'Archive', pending, function () {
+        actions.appendChild(buildTaskActionButton(task, 'Archive', 'archiveTask', pendingFn, function () {
           runTaskAction(task.id, 'archiveTask', 'Task archived.');
         }));
       } else if (task.status === 'Done') {
-        actions.appendChild(buildTaskActionButton(task, 'Reopen', pending, function () {
+        actions.appendChild(buildTaskActionButton(task, 'Reopen', 'reopenTask', pendingFn, function () {
           runTaskAction(task.id, 'reopenTask', 'Task reopened.');
         }));
-        actions.appendChild(buildTaskActionButton(task, 'Archive', pending, function () {
+        actions.appendChild(buildTaskActionButton(task, 'Archive', 'archiveTask', pendingFn, function () {
           runTaskAction(task.id, 'archiveTask', 'Task archived.');
         }));
       }
@@ -410,11 +410,20 @@
       return li;
     }
 
-    function buildTaskActionButton(task, label, pending, onClick) {
+    function buildTaskActionButton(task, label, fnName, pendingFn, onClick) {
       var btn = document.createElement('button');
       btn.type = 'button';
-      btn.textContent = label;
-      btn.disabled = pending;
+
+      var isPendingThis = pendingFn === fnName;
+      var btnText = label;
+      if (isPendingThis) {
+        if (label === 'Complete') btnText = 'Completing…';
+        else if (label === 'Archive') btnText = 'Archiving…';
+        else if (label === 'Reopen') btnText = 'Reopening…';
+      }
+
+      btn.textContent = btnText;
+      btn.disabled = !!pendingFn;
       // setAttribute never parses its value as markup, so building this
       // string from task.title (server-derived free text) is safe — this
       // is not an innerHTML/markup-injection path.
@@ -426,7 +435,7 @@
     // Only the acted-on task's own buttons are disabled while its request
     // is in flight — the rest of the list stays interactive.
     function runTaskAction(id, fnName, successMessage) {
-      taskActionPending[id] = true;
+      taskActionPending[id] = fnName;
       tasksActionError = null;
       renderTasksContainer();
 
@@ -866,12 +875,13 @@
     function buildJobActions(job) {
       var actions = document.createElement('div');
       actions.className = 'job-actions';
-      var pending = !!jobsState.pending[job.id];
+      var pendingAction = jobsState.pending[job.id];
       jobStatusActions(job).forEach(function (action) {
         var button = document.createElement('button');
         button.type = 'button';
-        button.textContent = action.label;
-        button.disabled = pending;
+        var isPendingThis = pendingAction === action.target;
+        button.textContent = isPendingThis ? action.label + '…' : action.label;
+        button.disabled = !!pendingAction;
         if (action.destructive) button.className = 'is-destructive';
         button.setAttribute('aria-label', action.label + ' for "' + job.title + '"');
         button.addEventListener('click', function () {
@@ -884,7 +894,7 @@
 
     function runJobStatusAction(jobId, targetStatus, label) {
       if (jobsState.pending[jobId]) return;
-      jobsState.pending[jobId] = true;
+      jobsState.pending[jobId] = targetStatus;
       jobsState.errorMessage = '';
       renderJobsContainer();
       google.script.run
@@ -916,7 +926,8 @@
       textarea.setAttribute('aria-label', 'Add note for "' + job.title + '"');
       var button = document.createElement('button');
       button.type = 'submit';
-      button.textContent = 'Save note';
+      var isPendingNote = jobsState.pending[job.id] === 'note';
+      button.textContent = isPendingNote ? 'Saving note…' : 'Save note';
       button.disabled = !!jobsState.pending[job.id];
       form.appendChild(label);
       form.appendChild(textarea);
@@ -931,7 +942,7 @@
           }
           return;
         }
-        jobsState.pending[job.id] = true;
+        jobsState.pending[job.id] = 'note';
         jobsState.errorMessage = '';
         renderJobsContainer();
         google.script.run
