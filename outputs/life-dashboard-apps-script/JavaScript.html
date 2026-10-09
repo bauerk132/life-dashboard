@@ -413,7 +413,7 @@
     function buildTaskActionButton(task, label, pending, onClick) {
       var btn = document.createElement('button');
       btn.type = 'button';
-      btn.textContent = label;
+      btn.textContent = pending ? label + '…' : label;
       btn.disabled = pending;
       // setAttribute never parses its value as markup, so building this
       // string from task.title (server-derived free text) is safe — this
@@ -870,7 +870,7 @@
       jobStatusActions(job).forEach(function (action) {
         var button = document.createElement('button');
         button.type = 'button';
-        button.textContent = action.label;
+        button.textContent = pending ? action.label + '…' : action.label;
         button.disabled = pending;
         if (action.destructive) button.className = 'is-destructive';
         button.setAttribute('aria-label', action.label + ' for "' + job.title + '"');
@@ -916,7 +916,7 @@
       textarea.setAttribute('aria-label', 'Add note for "' + job.title + '"');
       var button = document.createElement('button');
       button.type = 'submit';
-      button.textContent = 'Save note';
+      button.textContent = jobsState.pending[job.id] ? 'Save note…' : 'Save note';
       button.disabled = !!jobsState.pending[job.id];
       form.appendChild(label);
       form.appendChild(textarea);
@@ -932,6 +932,8 @@
           return;
         }
         jobsState.pending[job.id] = true;
+        button.disabled = true;
+        button.textContent = 'Save note…';
         jobsState.errorMessage = '';
         renderJobsContainer();
         google.script.run
@@ -1116,7 +1118,10 @@
     function runScoreNextJob() {
       if (scoringBudgetState.scoringPending) return;
       scoringBudgetState.scoringPending = true;
-      if (scoreNextJobBtn) scoreNextJobBtn.disabled = true;
+      if (scoreNextJobBtn) {
+        scoreNextJobBtn.disabled = true;
+        scoreNextJobBtn.textContent = 'Scoring next eligible job…';
+      }
       if (scoringBudgetStatusEl) scoringBudgetStatusEl.setAttribute('aria-busy', 'true');
       if (scoringRunResultEl) {
         scoringRunResultEl.className = 'scoring-run-banner';
@@ -1128,7 +1133,10 @@
         .withSuccessHandler(function (result) {
           scoringBudgetState.scoringPending = false;
           if (scoringBudgetStatusEl) scoringBudgetStatusEl.setAttribute('aria-busy', 'false');
-          if (scoreNextJobBtn) scoreNextJobBtn.disabled = false;
+          if (scoreNextJobBtn) {
+            scoreNextJobBtn.disabled = false;
+            scoreNextJobBtn.textContent = 'Score next eligible job';
+          }
 
           if (scoringRunResultEl) {
             if (result && result.stoppedReason) {
@@ -1153,7 +1161,10 @@
         .withFailureHandler(function (err) {
           scoringBudgetState.scoringPending = false;
           if (scoringBudgetStatusEl) scoringBudgetStatusEl.setAttribute('aria-busy', 'false');
-          if (scoreNextJobBtn) scoreNextJobBtn.disabled = false;
+          if (scoreNextJobBtn) {
+            scoreNextJobBtn.disabled = false;
+            scoreNextJobBtn.textContent = 'Score next eligible job';
+          }
 
           var errorMsg = 'The scoring run could not be completed. Refresh and try again.';
           if (err && err.code) {
@@ -1498,14 +1509,15 @@
       errorP.hidden = true;
       form.appendChild(errorP);
 
+      var pendingKey = 'new-' + job.id;
       var submitBtn = document.createElement('button');
       submitBtn.type = 'submit';
-      submitBtn.textContent = 'Save application record';
+      submitBtn.textContent = jobsState.appPending[pendingKey] ? 'Save application record…' : 'Save application record';
+      submitBtn.disabled = !!jobsState.appPending[pendingKey];
       form.appendChild(submitBtn);
 
       form.addEventListener('submit', function (evt) {
         evt.preventDefault();
-        var pendingKey = 'new-' + job.id;
         if (jobsState.appPending[pendingKey]) return;
 
         var input = {
@@ -1519,6 +1531,7 @@
 
         jobsState.appPending[pendingKey] = true;
         submitBtn.disabled = true;
+        submitBtn.textContent = 'Save application record…';
         errorP.hidden = true;
 
         google.script.run
@@ -1615,6 +1628,10 @@
           btn.textContent = 'Mark ' + targetStatus;
         }
 
+        if (isPending) {
+          btn.textContent += '…';
+        }
+
         btn.setAttribute('aria-label', btn.textContent + ' for application on ' + job.title);
         btn.addEventListener('click', function () {
           runApplicationStatusAction(app.id, targetStatus, btn.textContent, job, parentContainer);
@@ -1624,7 +1641,7 @@
 
       var editToggleBtn = document.createElement('button');
       editToggleBtn.type = 'button';
-      editToggleBtn.textContent = 'Edit details';
+      editToggleBtn.textContent = isPending ? 'Edit details…' : 'Edit details';
       editToggleBtn.disabled = isPending;
       actions.appendChild(editToggleBtn);
       card.appendChild(actions);
@@ -1633,7 +1650,8 @@
       editFormBox.hidden = true;
       editToggleBtn.addEventListener('click', function () {
         editFormBox.hidden = !editFormBox.hidden;
-        editToggleBtn.textContent = editFormBox.hidden ? 'Edit details' : 'Cancel edit';
+        var baseLabel = editFormBox.hidden ? 'Edit details' : 'Cancel edit';
+        editToggleBtn.textContent = isPending ? baseLabel + '…' : baseLabel;
       });
       editFormBox.appendChild(buildEditApplicationForm(app, job, parentContainer));
       card.appendChild(editFormBox);
@@ -1755,7 +1773,8 @@
 
       var saveBtn = document.createElement('button');
       saveBtn.type = 'submit';
-      saveBtn.textContent = 'Save details';
+      saveBtn.textContent = jobsState.appPending[app.id] ? 'Save details…' : 'Save details';
+      saveBtn.disabled = !!jobsState.appPending[app.id];
       form.appendChild(saveBtn);
 
       form.addEventListener('submit', function (evt) {
@@ -1771,6 +1790,7 @@
 
         jobsState.appPending[app.id] = true;
         saveBtn.disabled = true;
+        saveBtn.textContent = 'Save details…';
         errorP.hidden = true;
 
         google.script.run
