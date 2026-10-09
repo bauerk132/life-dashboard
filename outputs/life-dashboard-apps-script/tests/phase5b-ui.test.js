@@ -684,7 +684,7 @@ describe('Phase 5B UI: 7. Application tracking workflow & legal transitions', ()
     assert.equal(actionLabels.includes('Record interview'), false, 'Draft cannot jump to Interview');
 
     // Click Record as applied
-    const appliedBtn = actions.find(b => b.textContent === 'Record as applied');
+    const appliedBtn = actions.find(b => b.textContent.startsWith('Record as applied'));
     appliedBtn.click();
     await wait(40);
 
@@ -754,7 +754,7 @@ describe('Phase 5B UI: 8. Synchronized refresh and atomicity on transitions', ()
     await wait(30);
 
     const initialQueueCalls = harness.getCallCounts().getJobsQueue || 0;
-    const applyBtn = appSection.querySelectorAll('.app-actions button').find(b => b.textContent === 'Record as applied');
+    const applyBtn = appSection.querySelectorAll('.app-actions button').find(b => b.textContent.startsWith('Record as applied'));
     assert.ok(applyBtn, 'Record as applied button found');
     applyBtn.click();
     await wait(40);
@@ -773,7 +773,7 @@ describe('Phase 5B UI: 8. Synchronized refresh and atomicity on transitions', ()
     appSection.toggle();
     await wait(30);
 
-    const applyBtn = appSection.querySelectorAll('.app-actions button').find(b => b.textContent === 'Record as applied');
+    const applyBtn = appSection.querySelectorAll('.app-actions button').find(b => b.textContent.startsWith('Record as applied'));
     assert.ok(applyBtn, 'Record as applied button found');
     applyBtn.click();
     await wait(40);

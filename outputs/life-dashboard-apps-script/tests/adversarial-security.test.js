@@ -656,7 +656,7 @@ describe('Adversarial 2: Double-Click Suppression & Concurrency Invariants', () 
     const card = harness.elements.jobsContainer.querySelector('.job-card');
     assert.ok(card, 'job card rendered');
     const actions = card.querySelectorAll('.job-actions button');
-    const reviewBtn = actions.find(b => b.textContent === 'Mark reviewed');
+    const reviewBtn = actions.find(b => b.textContent.startsWith('Mark reviewed'));
     assert.ok(reviewBtn, 'Mark reviewed button exists');
 
     // Burst of 5 clicks on the button
@@ -664,7 +664,7 @@ describe('Adversarial 2: Double-Click Suppression & Concurrency Invariants', () 
     // Subsequent clicks either on the old ref or current ref
     reviewBtn.click();
     const currentCard = harness.elements.jobsContainer.querySelector('.job-card');
-    const currentReviewBtn = currentCard.querySelectorAll('.job-actions button').find(b => b.textContent === 'Mark reviewed');
+    const currentReviewBtn = currentCard.querySelectorAll('.job-actions button').find(b => b.textContent.startsWith('Mark reviewed'));
     currentReviewBtn.click();
     currentReviewBtn.click();
     currentReviewBtn.click();
@@ -719,7 +719,7 @@ describe('Adversarial 2: Double-Click Suppression & Concurrency Invariants', () 
 
     const appCard = appSection.querySelector('.application-card');
     assert.ok(appCard, 'application card found');
-    const appliedBtn = appCard.querySelectorAll('.app-actions button').find(b => b.textContent === 'Record as applied');
+    const appliedBtn = appCard.querySelectorAll('.app-actions button').find(b => b.textContent.startsWith('Record as applied'));
     assert.ok(appliedBtn, 'Record as applied button found');
 
     // Rapid burst clicks
@@ -757,7 +757,7 @@ describe('Adversarial 3: State Transitions and Error Recovery', () => {
     assert.ok(appCard, 'appCard found');
     const initialCalls = harness.getCallCounts().getApplicationsByJobId || 0;
 
-    const appliedBtn = appCard.querySelectorAll('.app-actions button').find(b => b.textContent === 'Record as applied');
+    const appliedBtn = appCard.querySelectorAll('.app-actions button').find(b => b.textContent.startsWith('Record as applied'));
     assert.ok(appliedBtn, 'button found');
 
     // Attempt transition under CONFLICT
@@ -790,7 +790,7 @@ describe('Adversarial 3: State Transitions and Error Recovery', () => {
 
     const appCard = appSection.querySelector('.application-card');
     assert.ok(appCard, 'appCard found');
-    const appliedBtn = appCard.querySelectorAll('.app-actions button').find(b => b.textContent === 'Record as applied');
+    const appliedBtn = appCard.querySelectorAll('.app-actions button').find(b => b.textContent.startsWith('Record as applied'));
 
     appliedBtn.click();
     await wait(80); // wait for failure callback and announceAlert 30ms timer
@@ -824,7 +824,7 @@ describe('Adversarial 3: State Transitions and Error Recovery', () => {
 
     const appCard = appSection.querySelector('.application-card');
     assert.ok(appCard, 'app card found');
-    const editBtn = appCard.querySelectorAll('.app-actions button').find(b => b.textContent === 'Edit details');
+    const editBtn = appCard.querySelectorAll('.app-actions button').find(b => b.textContent.startsWith('Edit details'));
     assert.ok(editBtn, 'Edit details button found');
     editBtn.click();
 
@@ -895,7 +895,7 @@ describe('Adversarial 3: State Transitions and Error Recovery', () => {
     await wait(30);
 
     const card = harness.elements.jobsContainer.querySelector('.job-card');
-    const reviewBtn = card.querySelectorAll('.job-actions button').find(b => b.textContent === 'Mark reviewed');
+    const reviewBtn = card.querySelectorAll('.job-actions button').find(b => b.textContent.startsWith('Mark reviewed'));
 
     // First attempt fails
     reviewBtn.click();
@@ -909,7 +909,7 @@ describe('Adversarial 3: State Transitions and Error Recovery', () => {
     // Now retry with success: verify stale error is cleared immediately when starting action
     succeedAction = true;
     const reCard = harness.elements.jobsContainer.querySelector('.job-card');
-    const reBtn = reCard.querySelectorAll('.job-actions button').find(b => b.textContent === 'Mark reviewed');
+    const reBtn = reCard.querySelectorAll('.job-actions button').find(b => b.textContent.startsWith('Mark reviewed'));
     reBtn.click();
 
     // Immediately after click, jobsState.errorMessage is cleared (verified by design pass change)
