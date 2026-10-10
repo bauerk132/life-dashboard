@@ -39,8 +39,8 @@
         <form id="add-task-form" class="card" novalidate>
           <h3 id="add-task-heading">Add a task</h3>
           <div class="field">
-            <label for="task-title">Title</label>
-            <input type="text" id="task-title" name="title" maxlength="200" autocomplete="off" required>
+            <label for="task-title">Title <span aria-hidden="true" style="color: var(--red-ink);">*</span><span class="visually-hidden"> (required)</span></label>
+            <input type="text" id="task-title" name="title" maxlength="200" autocomplete="off" aria-describedby="add-task-error" placeholder="e.g., Update resume, Follow up with recruiter" required>
           </div>
           <div class="field">
             <label for="task-due-date">Due date (optional)</label>
