@@ -173,9 +173,7 @@ function getActiveApplicationForJob_(ss, jobId) {
 }
 
 function getApplicationsForJob_(ss, jobId) {
-  return readRows_(ss, 'Applications').filter(function (app) {
-    return app.job_id === jobId;
-  });
+  return readRowsByKey_(ss, 'Applications', 'job_id', jobId);
 }
 
 function parseApplicationStoredDate_(value) {
@@ -503,8 +501,7 @@ function getApplicationHistory(applicationId) {
     findUniqueApplicationById_(ss, applicationId.trim());
     const entries = [];
     let quarantinedCount = 0;
-    readRows_(ss, 'ApplicationHistory').forEach(function (entry) {
-      if (entry.application_id !== applicationId.trim()) return;
+    readRowsByKey_(ss, 'ApplicationHistory', 'application_id', applicationId.trim()).forEach(function (entry) {
       const created = parseApplicationStoredDate_(entry.created_at);
       if (!isNonBlankString_(entry.id) || !isNonBlankString_(entry.action) || !created) {
         quarantinedCount += 1;
