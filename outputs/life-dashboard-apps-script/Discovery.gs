@@ -567,12 +567,11 @@ function discoveryRunPipeline_(mode, options) {
     }
 
     // 5. Open or resume DiscoveryRuns row
-    const allRuns = readRows_(ss, 'DiscoveryRuns');
-    const resumableRuns = allRuns.filter(function (r) {
-      return r.source === DISCOVERY_SOURCE_NAME_ &&
-             r.mode === mode &&
-             r.date_key === dateKey &&
-             (r.status === 'IN_PROGRESS' || r.status === 'PARTIAL');
+    const resumableRuns = queryRecordsInDb_(ss, 'DiscoveryRuns', {
+      source: DISCOVERY_SOURCE_NAME_,
+      mode: mode,
+      date_key: dateKey,
+      status: ['IN_PROGRESS', 'PARTIAL']
     });
 
     if (resumableRuns.length > 1) {
