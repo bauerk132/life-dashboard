@@ -4,3 +4,6 @@
 ## 2024-10-09 - Syncing automated test assertions with dynamic text-based loading states
 **Learning:** When adding text-based loading indicators (like appending `…` to button text during async operations instead of swapping DOM elements or adding CSS classes), exact-match text assertions in automated integration/e2e tests (like `b.textContent === 'Mark reviewed'`) will fail during the simulated async wait.
 **Action:** Use `.startsWith()` (or similar prefix-based matching) in test assertions to make them resilient to dynamic text appendages for loading states.
+## 2024-10-18 - Accessible Required Fields and Form Validation
+**Learning:** For required UI form inputs, improve accessibility by adding a visual asterisk wrapped in `<span aria-hidden="true">*</span>` within the label alongside the native `required` attribute. This prevents screen readers from redundantly announcing the asterisk. For accessible form validation, use `aria-describedby` on input fields to clearly link them to error message element IDs, and dynamically toggle `aria-invalid='true'` via JavaScript when validation fails.
+**Action:** Consistently apply `aria-hidden="true"` to visual asterisks and use `aria-describedby` combined with dynamically toggled `aria-invalid` attributes for robust and accessible form validation.
