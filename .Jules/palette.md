@@ -1,6 +1,7 @@
-## 2024-10-04 - Loading States for Queue Refresh
-**Learning:** For UX enhancements requiring loading states, text-based async feedback (like changing "Refresh queue" to "Refreshing queue...") provides effective visual feedback without introducing new custom CSS spinner dependencies.
-**Action:** Always prefer updating textContent on interactive buttons to indicate loading states rather than adding custom CSS, ensuring it aligns with the project's minimal styling approach.
-## 2024-10-09 - Syncing automated test assertions with dynamic text-based loading states
-**Learning:** When adding text-based loading indicators (like appending `…` to button text during async operations instead of swapping DOM elements or adding CSS classes), exact-match text assertions in automated integration/e2e tests (like `b.textContent === 'Mark reviewed'`) will fail during the simulated async wait.
-**Action:** Use `.startsWith()` (or similar prefix-based matching) in test assertions to make them resilient to dynamic text appendages for loading states.
+## 2024-10-20 - Form Validation Accessibility
+**Learning:** Found an accessibility issue pattern where form inputs lacking `aria-describedby` and dynamic `aria-invalid` attributes fail to associate inline error messages with the active input, reducing screen reader clarity. Visual asterisks also lacked `aria-hidden`.
+**Action:** Always link input fields to their error message elements using `aria-describedby`, dynamically toggle `aria-invalid` via JavaScript on validation failure, and wrap required field asterisks in `<span aria-hidden="true">` to prevent redundant announcements.
+
+## 2024-10-20 - Form Validation Accessibility
+**Learning:** Found an accessibility issue pattern where form inputs lacking `aria-describedby` and dynamic `aria-invalid` attributes fail to associate inline error messages with the active input, reducing screen reader clarity. Visual asterisks also lacked `aria-hidden`.
+**Action:** Always link input fields to their error message elements using `aria-describedby`, dynamically toggle `aria-invalid` via JavaScript on validation failure, and wrap required field asterisks in `<span aria-hidden="true">` to prevent redundant announcements.
