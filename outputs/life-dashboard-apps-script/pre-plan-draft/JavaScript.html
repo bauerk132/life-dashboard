@@ -6,6 +6,16 @@
   const formatDate = (value) => value ? new Date(value).toLocaleDateString(undefined,{month:'short',day:'numeric'}) : 'No due date';
   const call = (name, ...args) => new Promise((resolve, reject) => google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[name](...args));
 
+  function el(tag, className, textContent, attributes = {}) {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (textContent) element.textContent = textContent;
+    for (const [key, value] of Object.entries(attributes)) {
+      element.setAttribute(key, value);
+    }
+    return element;
+  }
+
   document.addEventListener('DOMContentLoaded', loadDashboard);
   async function loadDashboard() {
     try { state.data = await call('getDashboardData'); render(); }
@@ -22,19 +32,194 @@
     $('#' + view).classList.remove('hidden');
   }
   document.querySelectorAll('.tab').forEach(button => button.addEventListener('click', () => showView(button.dataset.view)));
+
   function renderHome() {
     const { stats, tasks, events } = state.data;
-    $('#home').innerHTML = `<div class="grid stats"><article class="card"><div class="label">Open tasks</div><div class="metric">${stats.openTasks}</div></article><article class="card"><div class="label">Completed tasks</div><div class="metric">${stats.completedTasks}</div></article><article class="card"><div class="label">Strong-match jobs</div><div class="metric">${stats.readyJobs}</div></article><article class="card"><div class="label">Applications sent</div><div class="metric">${stats.appliedJobs}</div></article></div><div class="grid two" style="margin-top:16px"><article class="card"><h2 class="section-title">Next up</h2><p class="muted">From your Google Calendar</p>${events.length ? events.map(e => `<div class="row"><span>${escapeHtml(e.title)}</span><span class="muted">${e.allDay ? 'All day' : new Date(e.start).toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit'})}</span></div>`).join('') : '<p class="empty">No calendar events to show. Calendar permission is optional.</p>'}</article><article class="card"><h2 class="section-title">Today’s tasks</h2>${tasks.slice(0,5).map(taskRow).join('') || '<p class="empty">No tasks yet.</p>'}</article></div>`;
+    const home = $('#home');
+    home.textContent = '';
+
+    const statsGrid = el('div', 'grid stats');
+    const statsData = [
+      { label: 'Open tasks', metric: stats.openTasks },
+      { label: 'Completed tasks', metric: stats.completedTasks },
+      { label: 'Strong-match jobs', metric: stats.readyJobs },
+      { label: 'Applications sent', metric: stats.appliedJobs }
+    ];
+    statsData.forEach(s => {
+      const card = el('article', 'card');
+      card.appendChild(el('div', 'label', s.label));
+      card.appendChild(el('div', 'metric', s.metric));
+      statsGrid.appendChild(card);
+    });
+    home.appendChild(statsGrid);
+
+    const twoGrid = el('div', 'grid two');
+    twoGrid.style.marginTop = '16px';
+
+    const eventsCard = el('article', 'card');
+    eventsCard.appendChild(el('h2', 'section-title', 'Next up'));
+    eventsCard.appendChild(el('p', 'muted', 'From your Google Calendar'));
+    if (events.length) {
+      events.forEach(e => {
+        const row = el('div', 'row');
+        row.appendChild(el('span', '', e.title));
+        const time = e.allDay ? 'All day' : new Date(e.start).toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit'});
+        row.appendChild(el('span', 'muted', time));
+        eventsCard.appendChild(row);
+      });
+    } else {
+      eventsCard.appendChild(el('p', 'empty', 'No calendar events to show. Calendar permission is optional.'));
+    }
+    twoGrid.appendChild(eventsCard);
+
+    const tasksCard = el('article', 'card');
+    tasksCard.appendChild(el('h2', 'section-title', 'Today’s tasks'));
+    const topTasks = tasks.slice(0, 5);
+    if (topTasks.length) {
+      topTasks.forEach(task => tasksCard.appendChild(taskRow(task)));
+    } else {
+      tasksCard.appendChild(el('p', 'empty', 'No tasks yet.'));
+    }
+    twoGrid.appendChild(tasksCard);
+
+    home.appendChild(twoGrid);
   }
+
   function renderJobs() {
     const jobs = state.data.jobs.filter(job => state.jobFilter === 'all' || (state.jobFilter === 'strong' && Number(job.overall_match) >= 90) || (state.jobFilter === 'remote' && String(job.remote).toLowerCase().includes('remote')) || (state.jobFilter === 'saved' && ['Saved','Ready to Apply'].includes(job.status)));
-    $('#jobs').innerHTML = `<div class="job-toolbar"><h2 class="section-title" style="margin-right:auto">Ready-to-go jobs</h2>${[['all','All'],['strong','90%+ match'],['remote','Remote'],['saved','Saved']].map(([id,label]) => `<button class="filter ${state.jobFilter===id?'active':''}" data-filter="${id}">${label}</button>`).join('')}</div><div class="job-list">${jobs.map(jobCard).join('') || '<article class="card empty">No jobs match this filter.</article>'}</div>`;
-    document.querySelectorAll('[data-filter]').forEach(button => button.addEventListener('click', () => { state.jobFilter = button.dataset.filter; renderJobs(); }));
-    document.querySelectorAll('[data-job-status]').forEach(button => button.addEventListener('click', () => changeJobStatus(button.dataset.id, button.dataset.jobStatus)));
+    const jobsContainer = $('#jobs');
+    jobsContainer.textContent = '';
+
+    const toolbar = el('div', 'job-toolbar');
+    const title = el('h2', 'section-title', 'Ready-to-go jobs');
+    title.style.marginRight = 'auto';
+    toolbar.appendChild(title);
+
+    const filters = [['all','All'],['strong','90%+ match'],['remote','Remote'],['saved','Saved']];
+    filters.forEach(([id,label]) => {
+      const btn = el('button', `filter ${state.jobFilter===id?'active':''}`, label, { 'data-filter': id });
+      btn.addEventListener('click', () => { state.jobFilter = id; renderJobs(); });
+      toolbar.appendChild(btn);
+    });
+    jobsContainer.appendChild(toolbar);
+
+    const jobList = el('div', 'job-list');
+    if (jobs.length) {
+      jobs.forEach(job => jobList.appendChild(jobCard(job)));
+    } else {
+      jobList.appendChild(el('article', 'card empty', 'No jobs match this filter.'));
+    }
+    jobsContainer.appendChild(jobList);
   }
-  function jobCard(job) { return `<article class="card job-card"><div class="job-head"><div><h3 class="job-title">${escapeHtml(job.title)}</h3><p class="company">${escapeHtml(job.company)} · ${escapeHtml(job.location)}</p></div><div class="score">${escapeHtml(job.overall_match || '—')}<span>MATCH</span></div></div><div class="pills"><span class="pill">${escapeHtml(job.remote || 'Location unknown')}</span><span class="pill">${formatMoney(job.salary_min,job.salary_max)}</span><span class="pill">${escapeHtml(job.recommendation || 'Unscored')}</span><span class="pill">${escapeHtml(job.status)}</span></div><div class="reason"><div><strong>Why it matches</strong>${escapeHtml(job.why_matches || 'Awaiting scoring')}</div><div><strong>Possible gaps</strong>${escapeHtml(job.gaps || 'None identified')}</div></div><div class="actions"><button class="button" data-id="${job.id}" data-job-status="Reviewed">Reviewed</button><button class="button primary" data-id="${job.id}" data-job-status="Saved">Save</button><button class="button" data-id="${job.id}" data-job-status="Ready to Apply">Ready to apply</button>${job.url ? `<a class="button" href="${escapeHtml(job.url)}" target="_blank" rel="noopener">View job</a>` : ''}<button class="button danger" data-id="${job.id}" data-job-status="Rejected">Reject</button></div></article>`; }
-  function renderTasks() { $('#tasks').innerHTML = `<article class="card"><h2 class="section-title">Tasks</h2><p class="muted">Changes save straight to your Tasks sheet.</p><form class="task-form" id="taskForm"><input class="field" name="title" required placeholder="Add a task"><input class="field" name="dueDate" type="date"><select class="field" name="priority"><option>Medium</option><option>High</option><option>Low</option></select><button class="button primary">Add task</button></form><div>${state.data.tasks.map(taskRow).join('') || '<p class="empty">No tasks yet.</p>'}</div></article>`; $('#taskForm').addEventListener('submit', addTask); document.querySelectorAll('[data-task-id]').forEach(button => button.addEventListener('click', () => changeTaskStatus(button.dataset.taskId, button.dataset.taskStatus))); }
-  function taskRow(task) { const done = task.status === 'Done'; return `<div class="row"><div><strong class="${done?'done':''}">${escapeHtml(task.title)}</strong><div class="muted">${formatDate(task.due_date)} · <span class="priority ${escapeHtml(task.priority)}">${escapeHtml(task.priority)}</span></div></div><button class="button" data-task-id="${task.id}" data-task-status="${done?'Open':'Done'}">${done?'Reopen':'Complete'}</button></div>`; }
+
+  function jobCard(job) {
+    const card = el('article', 'card job-card');
+
+    const head = el('div', 'job-head');
+    const headLeft = el('div');
+    headLeft.appendChild(el('h3', 'job-title', job.title));
+    headLeft.appendChild(el('p', 'company', `${job.company} · ${job.location}`));
+    head.appendChild(headLeft);
+    const score = el('div', 'score', job.overall_match || '—');
+    score.appendChild(el('span', '', 'MATCH'));
+    head.appendChild(score);
+    card.appendChild(head);
+
+    const pills = el('div', 'pills');
+    pills.appendChild(el('span', 'pill', job.remote || 'Location unknown'));
+    pills.appendChild(el('span', 'pill', formatMoney(job.salary_min,job.salary_max)));
+    pills.appendChild(el('span', 'pill', job.recommendation || 'Unscored'));
+    pills.appendChild(el('span', 'pill', job.status));
+    card.appendChild(pills);
+
+    const reason = el('div', 'reason');
+    const whyMatches = el('div');
+    whyMatches.appendChild(el('strong', '', 'Why it matches '));
+    whyMatches.appendChild(document.createTextNode(job.why_matches || 'Awaiting scoring'));
+    reason.appendChild(whyMatches);
+    const gaps = el('div');
+    gaps.appendChild(el('strong', '', 'Possible gaps '));
+    gaps.appendChild(document.createTextNode(job.gaps || 'None identified'));
+    reason.appendChild(gaps);
+    card.appendChild(reason);
+
+    const actions = el('div', 'actions');
+    const reviewedBtn = el('button', 'button', 'Reviewed', { 'data-id': job.id, 'data-job-status': 'Reviewed' });
+    reviewedBtn.addEventListener('click', () => changeJobStatus(job.id, 'Reviewed'));
+    actions.appendChild(reviewedBtn);
+
+    const saveBtn = el('button', 'button primary', 'Save', { 'data-id': job.id, 'data-job-status': 'Saved' });
+    saveBtn.addEventListener('click', () => changeJobStatus(job.id, 'Saved'));
+    actions.appendChild(saveBtn);
+
+    const applyBtn = el('button', 'button', 'Ready to apply', { 'data-id': job.id, 'data-job-status': 'Ready to Apply' });
+    applyBtn.addEventListener('click', () => changeJobStatus(job.id, 'Ready to Apply'));
+    actions.appendChild(applyBtn);
+
+    if (job.url) {
+      const link = el('a', 'button', 'View job', { href: job.url, target: '_blank', rel: 'noopener' });
+      actions.appendChild(link);
+    }
+
+    const rejectBtn = el('button', 'button danger', 'Reject', { 'data-id': job.id, 'data-job-status': 'Rejected' });
+    rejectBtn.addEventListener('click', () => changeJobStatus(job.id, 'Rejected'));
+    actions.appendChild(rejectBtn);
+
+    card.appendChild(actions);
+    return card;
+  }
+
+  function renderTasks() {
+    const tasksContainer = $('#tasks');
+    tasksContainer.textContent = '';
+
+    const card = el('article', 'card');
+    card.appendChild(el('h2', 'section-title', 'Tasks'));
+    card.appendChild(el('p', 'muted', 'Changes save straight to your Tasks sheet.'));
+
+    const form = el('form', 'task-form');
+    form.id = 'taskForm';
+    const inputTitle = el('input', 'field', '', { name: 'title', required: 'true', placeholder: 'Add a task' });
+    form.appendChild(inputTitle);
+    const inputDate = el('input', 'field', '', { name: 'dueDate', type: 'date' });
+    form.appendChild(inputDate);
+    const selectPriority = el('select', 'field', '', { name: 'priority' });
+    ['Medium', 'High', 'Low'].forEach(p => selectPriority.appendChild(el('option', '', p)));
+    form.appendChild(selectPriority);
+    const addBtn = el('button', 'button primary', 'Add task');
+    form.appendChild(addBtn);
+    form.addEventListener('submit', addTask);
+    card.appendChild(form);
+
+    const list = el('div');
+    if (state.data.tasks.length) {
+      state.data.tasks.forEach(task => list.appendChild(taskRow(task)));
+    } else {
+      list.appendChild(el('p', 'empty', 'No tasks yet.'));
+    }
+    card.appendChild(list);
+
+    tasksContainer.appendChild(card);
+  }
+
+  function taskRow(task) {
+    const done = task.status === 'Done';
+    const row = el('div', 'row');
+
+    const info = el('div');
+    info.appendChild(el('strong', done ? 'done' : '', task.title));
+    const muted = el('div', 'muted', `${formatDate(task.due_date)} · `);
+    muted.appendChild(el('span', `priority ${task.priority}`, task.priority));
+    info.appendChild(muted);
+    row.appendChild(info);
+
+    const btn = el('button', 'button', done ? 'Reopen' : 'Complete', { 'data-task-id': task.id, 'data-task-status': done ? 'Open' : 'Done' });
+    btn.addEventListener('click', () => changeTaskStatus(task.id, done ? 'Open' : 'Done'));
+    row.appendChild(btn);
+
+    return row;
+  }
+
   async function addTask(event) { event.preventDefault(); const form = new FormData(event.target); await runAction(() => call('createTask',{title:form.get('title'),dueDate:form.get('dueDate'),priority:form.get('priority')}),'Task added.'); }
   async function changeTaskStatus(id,status) { await runAction(() => call('setTaskStatus',id,status), status === 'Done' ? 'Task completed.' : 'Task reopened.'); }
   async function changeJobStatus(id,status) { await runAction(() => call('setJobStatus',id,status), `Job marked ${status}.`); }
