@@ -695,6 +695,21 @@
           ? 'No active stored jobs are ready to review.'
           : 'No active stored jobs match this filter.';
         container.appendChild(buildStateMessage(emptyMessage, false));
+        if (jobsState.data.activeJobs.length > 0 && jobsState.filter !== 'all') {
+          var clearBtnWrap = document.createElement('div');
+          clearBtnWrap.style.marginTop = '8px';
+          var clearBtn = document.createElement('button');
+          clearBtn.type = 'button';
+          clearBtn.className = 'secondary-button';
+          clearBtn.textContent = 'Clear filter';
+          clearBtn.addEventListener('click', function () {
+            jobsFilterEl.value = 'all';
+            jobsState.filter = 'all';
+            renderJobsContainer();
+          });
+          clearBtnWrap.appendChild(clearBtn);
+          container.appendChild(clearBtnWrap);
+        }
       } else {
         var list = document.createElement('ul');
         list.className = 'jobs-list';
