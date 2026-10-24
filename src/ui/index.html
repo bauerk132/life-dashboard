@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LifeOps Daily Planner</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1>LifeOps Daily Planner</h1>
+        <div id="current-time">--:--</div>
+        <button id="replan-btn">Replan Day</button>
+    </header>
+
+    <main class="container">
+        <!-- Morning Briefing Card -->
+        <section id="morning-briefing-card" class="card hidden">
+            <h2>Morning Briefing</h2>
+            <div id="briefing-content"></div>
+            <button id="close-briefing-btn">Close</button>
+        </section>
+
+        <div class="layout-grid">
+            <!-- Today View -->
+            <section id="today-view" class="card column">
+                <h2>Today's Timeline</h2>
+
+                <div class="top-priorities">
+                    <h3>Top Priorities</h3>
+                    <ul id="priorities-list"></ul>
+                </div>
+
+                <div id="timeline-container" class="timeline">
+                    <!-- Blocks injected via JS -->
+                </div>
+            </section>
+
+            <div class="column right-panel">
+                <!-- Focus Card -->
+                <section id="focus-card" class="card">
+                    <h2>Focus Mode</h2>
+                    <div id="focus-content">
+                        <h3 id="current-task-title">No active task</h3>
+                        <div id="focus-timer">--:--</div>
+                        <div class="focus-actions">
+                            <button id="mark-complete-btn" disabled>Mark Complete</button>
+                            <button id="skip-task-btn" disabled>Skip</button>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Chat Panel -->
+                <section id="chat-panel" class="card">
+                    <h2>Chat with Planner</h2>
+                    <div id="chat-messages" class="messages-area">
+                        <div class="message system">Hello! I'm your LifeOps Planner. How can I help you today?</div>
+                    </div>
+                    <div class="chat-input-area">
+                        <input type="text" id="chat-input" placeholder="Type a message...">
+                        <button id="send-chat-btn">Send</button>
+                    </div>
+                </section>
+            </div>
+        </div>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>
