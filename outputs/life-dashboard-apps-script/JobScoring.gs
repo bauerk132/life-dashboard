@@ -950,6 +950,14 @@ function scorePendingJobs(maxCandidates) {
     const runId = 'score_run_' + new Date().getTime();
     const allJobs = readRows_(ss, 'Jobs');
 
+    const allValidatedScores = readRows_(ss, 'JobScores').filter(s => s.status === 'Validated');
+    const validScoresByJobId = {};
+    for (let i = 0; i < allValidatedScores.length; i++) {
+      const s = allValidatedScores[i];
+      if (!validScoresByJobId[s.job_id]) validScoresByJobId[s.job_id] = [];
+      validScoresByJobId[s.job_id].push(s);
+    }
+
     // FIXED F7: Include jobs without score, or those whose score is out of date.
     const eligibleJobs = allJobs.filter(function (j) {
       if (!j.description || String(j.description).trim().length === 0) return false;
@@ -958,7 +966,7 @@ function scorePendingJobs(maxCandidates) {
 
       let needsRescore = false;
       if (!unscored) {
-        const scores = readRows_(ss, 'JobScores').filter(s => s.job_id === j.id && s.status === 'Validated');
+        const scores = validScoresByJobId[j.id] || [];
         const descHash = computeJobDescriptionHash_(j.description);
         const profile = typeof JOB_PROFILE_ !== 'undefined' ? JOB_PROFILE_ : { configVersion: 1 };
         const profileVersion = (profile && profile.configVersion) ? profile.configVersion.toString() : '1.0.0';
