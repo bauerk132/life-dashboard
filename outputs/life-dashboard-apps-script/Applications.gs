@@ -503,8 +503,7 @@ function getApplicationHistory(applicationId) {
     findUniqueApplicationById_(ss, applicationId.trim());
     const entries = [];
     let quarantinedCount = 0;
-    readRows_(ss, 'ApplicationHistory').forEach(function (entry) {
-      if (entry.application_id !== applicationId.trim()) return;
+    findRowsByKey_(ss, 'ApplicationHistory', 'application_id', applicationId.trim()).forEach(function (entry) {
       const created = parseApplicationStoredDate_(entry.created_at);
       if (!isNonBlankString_(entry.id) || !isNonBlankString_(entry.action) || !created) {
         quarantinedCount += 1;
