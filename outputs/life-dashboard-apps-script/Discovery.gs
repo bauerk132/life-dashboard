@@ -198,10 +198,11 @@ function discoveryEscapeRecord_(record) {
  * Loads the source disable/error state from Settings.
  *
  * @param {Spreadsheet} ss
+ * @param {Array<Object>} [optSettings] Optional pre-read Settings rows
  * @returns {{ enabled: boolean, consecutiveTerminalErrors: number, disabledAt: (string|null), reason: (string|null) }}
  */
-function discoveryLoadSourceStateInDb_(ss) {
-  const settings = readRows_(ss, 'Settings');
+function discoveryLoadSourceStateInDb_(ss, optSettings) {
+  const settings = optSettings || readRows_(ss, 'Settings');
   const matches = settings.filter(function (r) {
     return r.key === DISCOVERY_SOURCE_STATE_KEY_;
   });
@@ -248,10 +249,11 @@ function discoveryLoadSourceStateInDb_(ss) {
  *
  * @param {Spreadsheet} ss
  * @param {Object} state
+ * @param {Array<Object>} [optSettings] Optional pre-read Settings rows
  */
-function discoverySaveSourceStateInDb_(ss, state) {
+function discoverySaveSourceStateInDb_(ss, state, optSettings) {
   const jsonStr = JSON.stringify(state);
-  const settings = readRows_(ss, 'Settings');
+  const settings = optSettings || readRows_(ss, 'Settings');
   const matches = settings.filter(function (r) {
     return r.key === DISCOVERY_SOURCE_STATE_KEY_;
   });
@@ -275,10 +277,11 @@ function discoverySaveSourceStateInDb_(ss, state) {
  *
  * @param {Spreadsheet} ss
  * @param {Object} summary
+ * @param {Array<Object>} [optSettings] Optional pre-read Settings rows
  */
-function discoverySaveLastRunInDb_(ss, summary) {
+function discoverySaveLastRunInDb_(ss, summary, optSettings) {
   const jsonStr = JSON.stringify(summary);
-  const settings = readRows_(ss, 'Settings');
+  const settings = optSettings || readRows_(ss, 'Settings');
   const matches = settings.filter(function (r) {
     return r.key === DISCOVERY_SETTINGS_KEY_;
   });
@@ -526,7 +529,8 @@ function discoveryRunPipeline_(mode, options) {
     }
 
     // 4. Source state check (Settings sheet)
-    const sourceState = discoveryLoadSourceStateInDb_(ss);
+    const settingsRows = readRows_(ss, 'Settings');
+    const sourceState = discoveryLoadSourceStateInDb_(ss, settingsRows);
     if (!sourceState.enabled) {
       const disabledRunId = discoveryGenerateRunId_();
       try {
@@ -746,7 +750,7 @@ function discoveryRunPipeline_(mode, options) {
           sourceState.disabledAt = nowIso;
           sourceState.reason = fetchResult.status;
         }
-        discoverySaveSourceStateInDb_(ss, sourceState);
+        discoverySaveSourceStateInDb_(ss, sourceState, settingsRows);
         terminalStatus = 'FAILED';
         terminalErrorCode = fetchResult.status;
         break;
@@ -769,7 +773,7 @@ function discoveryRunPipeline_(mode, options) {
       // Successful fetch (OK or EMPTY)
       if (sourceState.consecutiveTerminalErrors > 0) {
         sourceState.consecutiveTerminalErrors = 0;
-        discoverySaveSourceStateInDb_(ss, sourceState);
+        discoverySaveSourceStateInDb_(ss, sourceState, settingsRows);
       }
 
       // Process adapter-quarantined items
@@ -914,7 +918,7 @@ function discoveryRunPipeline_(mode, options) {
       message: 'Discovery ' + mode + ' run finished with status ' + finalStatus + '.'
     };
 
-    discoverySaveLastRunInDb_(ss, runSummary);
+    discoverySaveLastRunInDb_(ss, runSummary, settingsRows);
     return runSummary;
   } finally {
     lock.releaseLock();
