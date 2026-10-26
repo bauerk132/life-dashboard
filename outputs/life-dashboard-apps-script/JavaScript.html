@@ -821,6 +821,7 @@
       // returned; using setAttribute avoids any HTML parsing path.
       sourceLink.setAttribute('href', job.sourceUrl);
       sourceLink.setAttribute('target', '_blank');
+      sourceLink.setAttribute('aria-label', 'Open source listing for "' + job.title + '" (opens in a new tab)');
       sourceLink.setAttribute('rel', 'noopener noreferrer');
       item.appendChild(sourceLink);
 
@@ -961,6 +962,7 @@
       details.className = 'job-history';
       var summary = document.createElement('summary');
       summary.textContent = 'View activity history';
+      summary.setAttribute('aria-label', 'View activity history for "' + job.title + '"');
       details.appendChild(summary);
       var state = jobsState.histories[job.id];
       if (state) appendJobHistoryState(details, state);
@@ -1208,6 +1210,7 @@
       var summary = document.createElement('summary');
       summary.className = 'job-scoring-summary';
       summary.textContent = 'AI Match & Scoring';
+      summary.setAttribute('aria-label', 'AI Match & Scoring for "' + job.title + '"');
       details.appendChild(summary);
 
       var body = document.createElement('div');
@@ -1357,6 +1360,7 @@
       var summary = document.createElement('summary');
       summary.className = 'job-applications-summary';
       summary.textContent = 'Application tracking';
+      summary.setAttribute('aria-label', 'Application tracking for "' + job.title + '"');
       details.appendChild(summary);
 
       var body = document.createElement('div');
@@ -1406,11 +1410,13 @@
         recordBtn.type = 'button';
         recordBtn.className = 'secondary-button';
         recordBtn.textContent = 'Record application';
+        recordBtn.setAttribute('aria-label', 'Record application for "' + job.title + '"');
         var formBox = document.createElement('div');
         formBox.hidden = true;
         recordBtn.addEventListener('click', function () {
           formBox.hidden = !formBox.hidden;
           recordBtn.textContent = formBox.hidden ? 'Record application' : 'Cancel recording';
+          recordBtn.setAttribute('aria-label', recordBtn.textContent + ' for "' + job.title + '"');
         });
         container.appendChild(recordBtn);
         formBox.appendChild(buildCreateApplicationForm(job, container));
@@ -1645,6 +1651,7 @@
       editToggleBtn.type = 'button';
       editToggleBtn.textContent = isPending ? 'Edit details…' : 'Edit details';
       editToggleBtn.disabled = isPending;
+      editToggleBtn.setAttribute('aria-label', editToggleBtn.textContent + ' for application on ' + job.title);
       actions.appendChild(editToggleBtn);
       card.appendChild(actions);
 
@@ -1654,6 +1661,7 @@
         editFormBox.hidden = !editFormBox.hidden;
         var baseLabel = editFormBox.hidden ? 'Edit details' : 'Cancel edit';
         editToggleBtn.textContent = isPending ? baseLabel + '…' : baseLabel;
+        editToggleBtn.setAttribute('aria-label', editToggleBtn.textContent + ' for application on ' + job.title);
       });
       editFormBox.appendChild(buildEditApplicationForm(app, job, parentContainer));
       card.appendChild(editFormBox);
@@ -1662,6 +1670,7 @@
       historyDetails.className = 'app-history-details';
       var historySummary = document.createElement('summary');
       historySummary.textContent = 'View application history';
+      historySummary.setAttribute('aria-label', 'View application history for "' + job.title + '"');
       historyDetails.appendChild(historySummary);
 
       var historyBody = document.createElement('div');
