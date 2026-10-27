@@ -817,6 +817,7 @@
       var sourceLink = document.createElement('a');
       sourceLink.className = 'job-source-link';
       sourceLink.textContent = 'Open source listing';
+      sourceLink.setAttribute('aria-label', 'Open source listing for "' + job.title + '"');
       // sourceUrl is server-validated by validateSourceUrl_ before it is
       // returned; using setAttribute avoids any HTML parsing path.
       sourceLink.setAttribute('href', job.sourceUrl);
@@ -1645,6 +1646,7 @@
       editToggleBtn.type = 'button';
       editToggleBtn.textContent = isPending ? 'Edit details…' : 'Edit details';
       editToggleBtn.disabled = isPending;
+      editToggleBtn.setAttribute('aria-label', editToggleBtn.textContent + ' for application on ' + job.title);
       actions.appendChild(editToggleBtn);
       card.appendChild(actions);
 
@@ -1654,6 +1656,7 @@
         editFormBox.hidden = !editFormBox.hidden;
         var baseLabel = editFormBox.hidden ? 'Edit details' : 'Cancel edit';
         editToggleBtn.textContent = isPending ? baseLabel + '…' : baseLabel;
+        editToggleBtn.setAttribute('aria-label', editToggleBtn.textContent + ' for application on ' + job.title);
       });
       editFormBox.appendChild(buildEditApplicationForm(app, job, parentContainer));
       card.appendChild(editFormBox);
