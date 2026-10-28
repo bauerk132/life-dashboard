@@ -822,6 +822,7 @@
       sourceLink.setAttribute('href', job.sourceUrl);
       sourceLink.setAttribute('target', '_blank');
       sourceLink.setAttribute('rel', 'noopener noreferrer');
+      sourceLink.setAttribute('aria-label', 'Open source listing for "' + job.title + '"');
       item.appendChild(sourceLink);
 
       if (job.recommendation || job.whyMatches || job.gaps) {
@@ -1406,11 +1407,13 @@
         recordBtn.type = 'button';
         recordBtn.className = 'secondary-button';
         recordBtn.textContent = 'Record application';
+        recordBtn.setAttribute('aria-label', 'Record application for "' + job.title + '"');
         var formBox = document.createElement('div');
         formBox.hidden = true;
         recordBtn.addEventListener('click', function () {
           formBox.hidden = !formBox.hidden;
           recordBtn.textContent = formBox.hidden ? 'Record application' : 'Cancel recording';
+          recordBtn.setAttribute('aria-label', recordBtn.textContent + ' for "' + job.title + '"');
         });
         container.appendChild(recordBtn);
         formBox.appendChild(buildCreateApplicationForm(job, container));
@@ -1645,6 +1648,7 @@
       editToggleBtn.type = 'button';
       editToggleBtn.textContent = isPending ? 'Edit details…' : 'Edit details';
       editToggleBtn.disabled = isPending;
+      editToggleBtn.setAttribute('aria-label', editToggleBtn.textContent + ' for application on "' + job.title + '"');
       actions.appendChild(editToggleBtn);
       card.appendChild(actions);
 
@@ -1654,6 +1658,7 @@
         editFormBox.hidden = !editFormBox.hidden;
         var baseLabel = editFormBox.hidden ? 'Edit details' : 'Cancel edit';
         editToggleBtn.textContent = isPending ? baseLabel + '…' : baseLabel;
+        editToggleBtn.setAttribute('aria-label', editToggleBtn.textContent + ' for application on "' + job.title + '"');
       });
       editFormBox.appendChild(buildEditApplicationForm(app, job, parentContainer));
       card.appendChild(editFormBox);
