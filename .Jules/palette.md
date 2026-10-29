@@ -7,3 +7,6 @@
 ## 2024-10-23 - Accessible Form Validation Indicators
 **Learning:** For required UI form inputs, improve accessibility by adding a visual asterisk wrapped in `<span aria-hidden="true">*</span>` within the label alongside the native `required` attribute. This prevents screen readers from redundantly announcing the asterisk.
 **Action:** Always link validation error messages directly to the input field using `aria-describedby` and dynamically toggle `aria-invalid="true"` when an error is present.
+## 2024-10-29 - Accessible Confirmations for Destructive Actions
+**Learning:** Native `window.confirm` provides an accessible, zero-dependency method for guarding destructive actions (like Reject or Withdraw) that remove items from active workflows, without requiring complex custom modal components or new CSS.
+**Action:** When adding confirmation dialogs for destructive actions, prefer intercepting the click event with `window.confirm` to ensure a robust, screen-reader friendly user experience while keeping the codebase lightweight.
