@@ -820,6 +820,7 @@
       // sourceUrl is server-validated by validateSourceUrl_ before it is
       // returned; using setAttribute avoids any HTML parsing path.
       sourceLink.setAttribute('href', job.sourceUrl);
+      sourceLink.setAttribute('aria-label', 'Open source listing for "' + job.title + '"');
       sourceLink.setAttribute('target', '_blank');
       sourceLink.setAttribute('rel', 'noopener noreferrer');
       item.appendChild(sourceLink);
@@ -1406,6 +1407,7 @@
         recordBtn.type = 'button';
         recordBtn.className = 'secondary-button';
         recordBtn.textContent = 'Record application';
+        recordBtn.setAttribute('aria-label', 'Record application for "' + job.title + '"');
         var formBox = document.createElement('div');
         formBox.hidden = true;
         recordBtn.addEventListener('click', function () {
@@ -1644,6 +1646,7 @@
       var editToggleBtn = document.createElement('button');
       editToggleBtn.type = 'button';
       editToggleBtn.textContent = isPending ? 'Edit details…' : 'Edit details';
+      editToggleBtn.setAttribute('aria-label', 'Edit details for application on "' + job.title + '"');
       editToggleBtn.disabled = isPending;
       actions.appendChild(editToggleBtn);
       card.appendChild(actions);
