@@ -877,6 +877,11 @@
         if (action.destructive) button.className = 'is-destructive';
         button.setAttribute('aria-label', action.label + ' for "' + job.title + '"');
         button.addEventListener('click', function () {
+          if (action.destructive) {
+            if (!window.confirm('Are you sure you want to ' + action.label.toLowerCase() + ' this job?')) {
+              return;
+            }
+          }
           runJobStatusAction(job.id, action.target, action.label);
         });
         actions.appendChild(button);
@@ -1636,6 +1641,12 @@
 
         btn.setAttribute('aria-label', btn.textContent + ' for application on ' + job.title);
         btn.addEventListener('click', function () {
+          var isDestructive = targetStatus === 'Rejected' || targetStatus === 'Withdrawn';
+          if (isDestructive) {
+            if (!window.confirm('Are you sure you want to mark this application as ' + targetStatus.toLowerCase() + '?')) {
+              return;
+            }
+          }
           runApplicationStatusAction(app.id, targetStatus, btn.textContent, job, parentContainer);
         });
         actions.appendChild(btn);
