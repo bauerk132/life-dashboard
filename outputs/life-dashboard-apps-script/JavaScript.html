@@ -817,6 +817,7 @@
       var sourceLink = document.createElement('a');
       sourceLink.className = 'job-source-link';
       sourceLink.textContent = 'Open source listing';
+      sourceLink.setAttribute('aria-label', 'Open source listing for "' + job.title + '"');
       // sourceUrl is server-validated by validateSourceUrl_ before it is
       // returned; using setAttribute avoids any HTML parsing path.
       sourceLink.setAttribute('href', job.sourceUrl);
@@ -1406,10 +1407,13 @@
         recordBtn.type = 'button';
         recordBtn.className = 'secondary-button';
         recordBtn.textContent = 'Record application';
+        recordBtn.setAttribute('aria-label', 'Record application for "' + job.title + '"');
+        recordBtn.setAttribute('aria-expanded', 'false');
         var formBox = document.createElement('div');
         formBox.hidden = true;
         recordBtn.addEventListener('click', function () {
           formBox.hidden = !formBox.hidden;
+          recordBtn.setAttribute('aria-expanded', !formBox.hidden);
           recordBtn.textContent = formBox.hidden ? 'Record application' : 'Cancel recording';
         });
         container.appendChild(recordBtn);
@@ -1645,6 +1649,8 @@
       editToggleBtn.type = 'button';
       editToggleBtn.textContent = isPending ? 'Edit details…' : 'Edit details';
       editToggleBtn.disabled = isPending;
+      editToggleBtn.setAttribute('aria-label', 'Edit application details for "' + job.title + '"');
+      editToggleBtn.setAttribute('aria-expanded', 'false');
       actions.appendChild(editToggleBtn);
       card.appendChild(actions);
 
@@ -1652,6 +1658,7 @@
       editFormBox.hidden = true;
       editToggleBtn.addEventListener('click', function () {
         editFormBox.hidden = !editFormBox.hidden;
+        editToggleBtn.setAttribute('aria-expanded', !editFormBox.hidden);
         var baseLabel = editFormBox.hidden ? 'Edit details' : 'Cancel edit';
         editToggleBtn.textContent = isPending ? baseLabel + '…' : baseLabel;
       });
