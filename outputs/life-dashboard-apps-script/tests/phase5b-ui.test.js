@@ -300,6 +300,7 @@ function createTestHarness(queryString = '', options = {}) {
   const navJobs = registerElement('button', 'nav-jobs', 'nav-link', { 'data-view': 'jobs' });
 
   const windowObj = {
+    confirm: () => true,
     setTimeout: (fn, ms) => setTimeout(fn, ms || 0),
     clearTimeout: id => clearTimeout(id),
     location: {
