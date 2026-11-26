@@ -468,9 +468,11 @@
       if (message) {
         addTaskErrorEl.textContent = message;
         addTaskErrorEl.hidden = false;
+        taskTitleInput.setAttribute('aria-invalid', 'true');
       } else {
         addTaskErrorEl.textContent = '';
         addTaskErrorEl.hidden = true;
+        taskTitleInput.removeAttribute('aria-invalid');
       }
     }
 
