@@ -316,6 +316,7 @@ function createAdversarialHarness(queryString = '', customMocks = null) {
   const windowObj = {
     setTimeout: (fn, ms) => setTimeout(fn, ms || 0),
     clearTimeout: id => clearTimeout(id),
+    confirm: () => true,
     location: {
       search: queryString
     },
