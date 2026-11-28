@@ -7,3 +7,6 @@
 ## 2024-10-23 - Accessible Form Validation Indicators
 **Learning:** For required UI form inputs, improve accessibility by adding a visual asterisk wrapped in `<span aria-hidden="true">*</span>` within the label alongside the native `required` attribute. This prevents screen readers from redundantly announcing the asterisk.
 **Action:** Always link validation error messages directly to the input field using `aria-describedby` and dynamically toggle `aria-invalid="true"` when an error is present.
+## 2024-11-20 - Contextual Labels for Repeating UI Components
+**Learning:** When generating repeating card elements with identical visual actions (e.g., 'Edit details' or 'Record application' buttons), appending contextual information (like the specific job title) to their `aria-label` attributes ensures screen reader users can distinguish between them. Furthermore, if these buttons toggle adjacent forms or content, their `aria-expanded` attributes must be dynamically synced with the hidden state.
+**Action:** Always verify if repeating interactive elements need context in their `aria-label` to be distinguishable, and ensure any toggled state is properly reflected in `aria-expanded`.
