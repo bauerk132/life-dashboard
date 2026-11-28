@@ -1,0 +1,4 @@
+💡 What: Added a 'Clear filter' button to the empty state when a job filter yields no results.
+🎯 Why: Allows users to quickly recover from over-filtering without navigating back to the dropdown.
+📸 Before/After: Visual verified via playwright.
+♿ Accessibility: Uses existing semantic elements.
