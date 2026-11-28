@@ -17,22 +17,25 @@ class Config:
 
 # Example usage for specific integrations
 class ProviderConfig:
+    def _get_token(self, key: str) -> Optional[str]:
+        return Config.get(key)
+
     @property
     def todoist_token(self) -> Optional[str]:
-        return Config.get('TODOIST_TOKEN')
+        return self._get_token('TODOIST_TOKEN')
 
     @property
     def microsoft_client_id(self) -> Optional[str]:
-        return Config.get('MICROSOFT_CLIENT_ID')
+        return self._get_token('MICROSOFT_CLIENT_ID')
 
     @property
     def microsoft_client_secret(self) -> Optional[str]:
-        return Config.get('MICROSOFT_CLIENT_SECRET')
+        return self._get_token('MICROSOFT_CLIENT_SECRET')
 
     @property
     def google_client_id(self) -> Optional[str]:
-        return Config.get('GOOGLE_CLIENT_ID')
+        return self._get_token('GOOGLE_CLIENT_ID')
 
     @property
     def google_client_secret(self) -> Optional[str]:
-        return Config.get('GOOGLE_CLIENT_SECRET')
+        return self._get_token('GOOGLE_CLIENT_SECRET')
