@@ -28,6 +28,28 @@ const MAX_CANDIDATES_PER_RUN_ = 10;
 const GEMINI_INPUT_COST_PER_MILLION_USD_ = 0.30;
 const GEMINI_OUTPUT_COST_PER_MILLION_USD_ = 2.50;
 
+let aiUsageCache_ = null;
+
+/**
+ * Returns a cached copy of the AIUsage sheet rows for the current execution.
+ */
+function getAIUsageCached_(ss) {
+  if (aiUsageCache_ === null) {
+    aiUsageCache_ = readRows_(ss, 'AIUsage');
+  }
+  return aiUsageCache_;
+}
+
+/**
+ * Updates the in-memory cache of AIUsage when a new record is appended.
+ */
+function appendToAIUsageCache_(record, generatedId) {
+  if (aiUsageCache_ !== null) {
+    const cachedRecord = Object.assign({}, record, { id: generatedId });
+    aiUsageCache_.push(cachedRecord);
+  }
+}
+
 // Integer 1e-5 USD "units" are used for all ledger arithmetic to avoid
 // floating-point drift at the exact boundary of the monthly ceiling.
 const MONETARY_UNITS_PER_USD_ = 100000;
@@ -349,7 +371,7 @@ function aggregateLedgerForPeriod_(rows, targetYearMonth) {
  * Reserves capacity before any provider network call.
  */
 function checkAndReserveMonthlyBudgetInDb_(ss, jobId, runId, profileVersion) {
-  const usageRows = readRows_(ss, 'AIUsage');
+  const usageRows = getAIUsageCached_(ss);
   const now = new Date();
   const currentYM = getNewYorkYearMonth_(now);
   const agg = aggregateLedgerForPeriod_(usageRows, currentYM);
@@ -388,6 +410,7 @@ function checkAndReserveMonthlyBudgetInDb_(ss, jobId, runId, profileVersion) {
   };
 
   const savedReservation = appendRecordInDb_(ss, 'AIUsage', reservationRecord);
+  appendToAIUsageCache_(reservationRecord, savedReservation.id);
   return savedReservation.id;
 }
 
@@ -406,11 +429,11 @@ function checkAndReserveMonthlyBudgetInDb_(ss, jobId, runId, profileVersion) {
 function reconcileUsageInDb_(ss, reservationId, inputTokens, outputTokens, status, errorCode) {
   const actualCost = calculateCostUsd_(inputTokens, outputTokens);
   // Get original reservation info
-  const reservations = readRows_(ss, 'AIUsage').filter(r => r.id === reservationId);
+  const reservations = getAIUsageCached_(ss).filter(r => r.id === reservationId);
   const res = reservations.length > 0 ? reservations[0] : {};
 
   // Append new row mapping back to the same run/job ID but marking 'reconcile'
-  return appendRecordInDb_(ss, 'AIUsage', {
+  const reconcileRecord = {
     run_id: res.run_id,
     job_id: res.job_id,
     provider: res.provider,
@@ -426,7 +449,11 @@ function reconcileUsageInDb_(ss, reservationId, inputTokens, outputTokens, statu
     currency: 'USD',
     status: status,
     error_code: errorCode || ''
-  });
+  };
+
+  const savedRecord = appendRecordInDb_(ss, 'AIUsage', reconcileRecord);
+  appendToAIUsageCache_(reconcileRecord, savedRecord.id);
+  return savedRecord;
 }
 
 /**
@@ -1010,7 +1037,7 @@ function scorePendingJobs(maxCandidates) {
  */
 function getScoringBudgetStatus() {
   const ss = getDb_();
-  const usageRows = readRows_(ss, 'AIUsage');
+  const usageRows = getAIUsageCached_(ss);
   const now = new Date();
   const currentYM = getNewYorkYearMonth_(now);
   const agg = aggregateLedgerForPeriod_(usageRows, currentYM);
