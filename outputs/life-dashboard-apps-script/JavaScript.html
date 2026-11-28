@@ -295,12 +295,6 @@
       container.appendChild(dl);
     }
 
-    // ---------------------------------------------------------------------
-    // Tasks list — rendered from the same dashboardState as the Home
-    // stats card. Per-task action buttons (Complete/Reopen/Archive) are
-    // shown only when the server would actually accept that transition
-    // for the task's current status.
-    // ---------------------------------------------------------------------
     var taskActionPending = {}; // task id -> true while a mutation is in-flight
     var tasksActionError = null; // last task-action failure message, shown inline
 
