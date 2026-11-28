@@ -20,6 +20,18 @@ class TestFilesTool(unittest.TestCase):
         self.assertEqual(len(files), 1)
         self.assertEqual(files[0].name, "test.txt")
 
+    def test_list_files_prevents_path_traversal(self):
+        # Setup files in a directory that shares the prefix
+        secret_file_info = FileInfo(id="2", name="secret.txt", path="/docs_secret/secret.txt", size_bytes=20, modified_time=datetime.now())
+        self.provider._add_stub_file(secret_file_info, b"secret")
+
+        # Query the base directory
+        files = self.tool.list_files("/docs")
+
+        # It should only return files in /docs, not /docs_secret
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].name, "test.txt")
+
         content = self.tool.read_file("/docs/test.txt")
         self.assertEqual(content, b"hello")
 

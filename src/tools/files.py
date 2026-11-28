@@ -1,3 +1,4 @@
+import os
 from abc import ABC, abstractmethod
 from typing import List, Optional
 from datetime import datetime
@@ -50,8 +51,13 @@ class StubFilesProvider(FilesProvider):
 
     def list_files(self, directory_path: str) -> List[FileInfo]:
         result = []
+        norm_dir = os.path.normpath(directory_path)
+        if not norm_dir.endswith(os.sep):
+            norm_dir += os.sep
+
         for path, data in self.files.items():
-            if path.startswith(directory_path) and path != directory_path:
+            norm_path = os.path.normpath(path)
+            if norm_path.startswith(norm_dir) and norm_path != norm_dir:
                 result.append(data['info'])
         return result
 
