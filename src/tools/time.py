@@ -2,8 +2,6 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 import time as time_module
 
-from src.tools.models import TimeInfo
-
 class TimeProvider(ABC):
     @abstractmethod
     def get_current_datetime(self) -> datetime:
