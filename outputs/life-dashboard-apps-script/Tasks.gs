@@ -39,7 +39,7 @@ function parseDateOnly_(value, fieldLabel) {
 }
 
 function findTaskById_(ss, id) {
-  return readRows_(ss, 'Tasks').filter(function (r) { return r.id === id; })[0] || null;
+  return findRecordByIdInDb_(ss, 'Tasks', id);
 }
 
 /**

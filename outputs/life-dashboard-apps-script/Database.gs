@@ -422,6 +422,51 @@ function readRows_(ss, sheetName) {
 }
 
 /**
+ * Reads a single record from sheetName by its id.
+ * Skips parsing the entire sheet if only one record is needed.
+ */
+function findRecordByIdInDb_(ss, sheetName, id) {
+  const sheet = getVerifiedSheet_(ss, sheetName);
+  const fields = SCHEMA[sheetName];
+  const dateOnly = DATE_ONLY_FIELDS_[sheetName] || [];
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+
+  const idIndex = fields.indexOf('id');
+  if (idIndex === -1) return null;
+
+  const values = sheet.getRange(2, 1, lastRow - 1, fields.length).getValues();
+  const tz = getTimeZone_();
+
+  const normalizedId = String(id);
+
+  for (let r = 0; r < values.length; r++) {
+    const row = values[r];
+    const isBlank = row.every(function (v) { return v === '' || v === null || v === undefined; });
+    if (isBlank) continue;
+
+    if (String(row[idIndex]) === normalizedId) {
+      const obj = {};
+      for (let c = 0; c < fields.length; c++) {
+        const field = fields[c];
+        const raw = row[c];
+        if (isDateValue_(raw)) {
+          obj[field] = dateOnly.indexOf(field) !== -1
+            ? Utilities.formatDate(raw, tz, 'yyyy-MM-dd')
+            : raw.toISOString();
+        } else if (raw === undefined || raw === null) {
+          obj[field] = '';
+        } else {
+          obj[field] = raw;
+        }
+      }
+      return obj;
+    }
+  }
+  return null;
+}
+
+/**
  * Appends one new record to sheetName. `record` must be a plain object
  * containing only known fields — an unrecognized key throws rather than
  * being silently dropped. `id` is generated when absent/blank; a supplied
