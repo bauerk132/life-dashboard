@@ -67,6 +67,18 @@ function appendRecord_(sheetName, record) {
   sheet.appendRow(headers.map(function(header) { return record[header] || ''; }));
 }
 
+function appendRecords_(sheetName, records) {
+  if (!records || records.length === 0) return;
+  const sheet = getSpreadsheet_().getSheetByName(sheetName);
+  const headers = HEADERS[sheetName];
+  const rows = records.map(function(record) {
+    return headers.map(function(header) { return record[header] || ''; });
+  });
+
+  const lastRow = sheet.getLastRow();
+  sheet.getRange(lastRow + 1, 1, rows.length, headers.length).setValues(rows);
+}
+
 function updateRecord_(sheetName, id, updates) {
   const sheet = getSpreadsheet_().getSheetByName(sheetName);
   const values = sheet.getDataRange().getValues();

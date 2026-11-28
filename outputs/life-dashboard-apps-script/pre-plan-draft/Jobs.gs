@@ -26,10 +26,11 @@ function upsertDiscoveredJobs(postings) {
     return index;
   }, {});
   let added = 0;
+  const newRecords = [];
   postings.forEach(function(posting) {
     const key = posting.externalId || posting.url;
     if (!key || seen[key]) return;
-    appendRecord_(CONFIG.SHEETS.JOBS, {
+    newRecords.push({
       id: Utilities.getUuid(), title: posting.title || '', company: posting.company || '',
       location: posting.location || '', remote: posting.remote || '', salary_min: posting.salaryMin || '',
       salary_max: posting.salaryMax || '', posted_at: posting.postedAt || '', source: posting.source || '',
@@ -41,6 +42,9 @@ function upsertDiscoveredJobs(postings) {
     seen[key] = true;
     added++;
   });
+  if (newRecords.length > 0) {
+    appendRecords_(CONFIG.SHEETS.JOBS, newRecords);
+  }
   return { added: added, duplicatesSkipped: postings.length - added };
 }
 
