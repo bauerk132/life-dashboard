@@ -386,6 +386,54 @@ function initializeDatabase() {
  * sheet, which serialize as yyyy-MM-dd in the script time zone. 0, false,
  * and '' are preserved exactly as stored.
  */
+/**
+ * Reads only rows from sheetName where the specified keyField matches keyValue.
+ * This is an optimized version of readRows_ that filters raw sheet values before
+ * performing date parsing and object allocation, significantly reducing memory
+ * and CPU usage when querying a large sheet for a specific ID.
+ */
+function findRowsByKey_(ss, sheetName, keyField, keyValue) {
+  const sheet = getVerifiedSheet_(ss, sheetName);
+  const fields = SCHEMA[sheetName];
+  const keyIndex = fields.indexOf(keyField);
+  if (keyIndex === -1) return [];
+
+  const dateOnly = DATE_ONLY_FIELDS_[sheetName] || [];
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  const values = sheet.getRange(2, 1, lastRow - 1, fields.length).getValues();
+  const tz = getTimeZone_();
+  const rows = [];
+  const normalizedKeyValue = String(keyValue);
+
+  for (let r = 0; r < values.length; r++) {
+    const row = values[r];
+    // Fast reject: check key field first before doing any other work
+    if (String(row[keyIndex]) !== normalizedKeyValue) continue;
+
+    const isBlank = row.every(function (v) { return v === '' || v === null || v === undefined; });
+    if (isBlank) continue;
+
+    const obj = {};
+    for (let c = 0; c < fields.length; c++) {
+      const field = fields[c];
+      const raw = row[c];
+      if (isDateValue_(raw)) {
+        obj[field] = dateOnly.indexOf(field) !== -1
+          ? Utilities.formatDate(raw, tz, 'yyyy-MM-dd')
+          : raw.toISOString();
+      } else if (raw === undefined || raw === null) {
+        obj[field] = '';
+      } else {
+        obj[field] = raw;
+      }
+    }
+    rows.push(obj);
+  }
+  return rows;
+}
+
 function readRows_(ss, sheetName) {
   const sheet = getVerifiedSheet_(ss, sheetName);
   const fields = SCHEMA[sheetName];
