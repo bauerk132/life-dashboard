@@ -93,25 +93,24 @@ function makeJSearchJob(overrides) {
   }, overrides);
 }
 
-function makeResponseBody(jobs) {
+const DEFAULT_RESPONSE_HEADERS = Object.freeze({
+  'content-type': 'application/json',
+  'x-ratelimit-requests-remaining': '190',
+  'x-ratelimit-requests-limit': '200'
+});
+
+function makeResponseBody(jobs = []) {
   return JSON.stringify({
     status: 'OK',
     request_id: 'test-req-1',
-    data: {
-      jobs: jobs || []
-    }
+    data: { jobs }
   });
 }
 
-function okResponse(jobs, overrides) {
-  overrides = overrides || {};
+function okResponse(jobs = [], overrides = {}) {
   return {
     code: 200,
-    headers: Object.assign({
-      'content-type': 'application/json',
-      'x-ratelimit-requests-remaining': '190',
-      'x-ratelimit-requests-limit': '200'
-    }, overrides.headers || {}),
+    headers: Object.assign({}, DEFAULT_RESPONSE_HEADERS, overrides.headers),
     body: makeResponseBody(jobs)
   };
 }
